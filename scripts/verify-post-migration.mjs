@@ -350,9 +350,13 @@ async function runOffensiveTests(business, creator, third) {
     }
 
     if (!creatorProfErr && creatorProf?.id) {
+      const { data: { user: bizUser } } = await business.supabase.auth.getUser();
+      if (!bizUser?.id) {
+        record('R15', 'Tercero no ve favoritos ajenos', 'ERROR', 'Sin usuario negocio para favorito');
+      } else {
       const { data: fav, error: favErr } = await business.supabase
         .from('favorites')
-        .insert({ creator_id: creatorProf.id })
+        .insert({ account_id: bizUser.id, creator_id: creatorProf.id })
         .select('id')
         .single();
       if (fav?.id) cleanup.favoriteId = fav.id;
@@ -363,6 +367,7 @@ async function runOffensiveTests(business, creator, third) {
           .from('favorites')
           .select('*', { count: 'exact', head: true });
         record('R15', 'Tercero no ve favoritos ajenos', !thirdFavErr && (count ?? 0) === 0 ? 'PASS' : 'FAIL', `count=${count ?? 0}`);
+      }
       }
     } else {
       record('R15', 'Tercero no ve favoritos ajenos', 'SKIPPED', 'Sin creator_profile');

@@ -58,6 +58,19 @@ export async function middleware(request: NextRequest) {
       denied.search = '';
       return NextResponse.redirect(denied);
     }
+  } else if (pathname.startsWith('/panel')) {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('active')
+      .eq('account_id', user.id)
+      .maybeSingle();
+
+    if (profile?.active === false) {
+      const blocked = request.nextUrl.clone();
+      blocked.pathname = '/login';
+      blocked.searchParams.set('blocked', '1');
+      return NextResponse.redirect(blocked);
+    }
   }
 
   return response;

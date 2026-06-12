@@ -10,6 +10,7 @@ import {
 import { Logo } from './Logo';
 import { createClient, isDemoMode, isSupabaseConfigured } from '@/lib/supabase/client';
 import { demoCampaigns, demoCreators } from '@/lib/demo';
+import { formatScoreDisplay } from '@/lib/score/kuvo-score';
 import type { Campaign, Creator } from '@/lib/types';
 
 const money = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 });
@@ -29,10 +30,11 @@ function normalizeCreator(row: any): Creator {
     city: profile.city || 'Argentina',
     category: categories[0] || 'Lifestyle',
     categories,
-    followers: Number(row.followers || 0),
-    engagement: Number(row.engagement || 0),
+    followers: Number(row.followers_declared ?? row.followers ?? 0),
+    engagement: Number(row.engagement_declared ?? row.engagement ?? 0),
     startingPrice: Number(row.starting_price || 0),
-    score: Number(row.score || 80),
+    score: row.score != null ? Number(row.score) : null,
+    scoreLabel: formatScoreDisplay(row.score != null ? Number(row.score) : null),
     verified: Boolean(profile.verified),
     bio: profile.bio || 'Perfil profesional disponible para colaboraciones.',
     initials: name.split(' ').slice(0,2).map((x:string)=>x[0]).join('').toUpperCase(),
@@ -187,16 +189,13 @@ export function Marketplace() {
               <span><Check/> Catálogo público</span><span><Check/> Perfiles verificados</span><Link href="/registro" className="trustLink">Registrate para gestionar lo tuyo →</Link>
             </div>
           </div>
-          <div className="heroPreview" aria-label="Vista previa del panel">
-            <div className="previewTop"><span/><span/><span/><b>Campaña activa</b></div>
+          <div className="heroPreview" aria-label="Vista ilustrativa del panel">
+            <div className="previewTop"><span/><span/><span/><b>Vista ilustrativa del panel</b></div>
             <div className="previewStats">
-              <div><span>Alcance estimado</span><strong>428K</strong><small><TrendingUp size={13}/> +18,4%</small></div>
-              <div><span>Creadores</span><strong>12</strong><small>4 preseleccionados</small></div>
+              <div><span>Ejemplo visual</span><strong>Panel</strong><small>Datos privados por usuario</small></div>
+              <div><span>Catálogo público</span><strong>Marketplace</strong><small>Creadores y campañas abiertas</small></div>
             </div>
-            <div className="chartBars">{[42,68,54,82,62,95,76,100,88,114,102,126].map((h,i)=><i key={i} style={{height:h}}/>)}</div>
-            <div className="previewList">
-              {demoCreators.slice(0,3).map(c=><div key={c.id}><span className="miniAvatar" style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}>{c.initials}</span><p><b>{c.name}</b><small>{c.category} · {compact.format(c.followers)}</small></p><strong>{c.score}</strong></div>)}
-            </div>
+            <p className="previewNote">Ilustración de referencia. Los números reales aparecen en tu cuenta.</p>
           </div>
         </div>
       </section>
@@ -238,7 +237,7 @@ export function Marketplace() {
                 <div className="creatorAvatar" style={{background:`linear-gradient(135deg,${c.gradient[1]},${c.gradient[0]})`}}>{c.initials}</div>
                 <div className="creatorName"><h3>{c.name}</h3>{c.verified && <BadgeCheck size={18}/>}</div>
                 <p className="creatorHandle">{c.username} · {c.city}</p>
-                <div className="creatorMetrics"><div><strong>{compact.format(c.followers)}</strong><span>Seguidores</span></div><div><strong>{c.engagement}%</strong><span>Interacción</span></div><div><strong>{c.score}</strong><span>KUVO Score</span></div></div>
+                <div className="creatorMetrics"><div><strong>{compact.format(c.followers)}</strong><span>Seguidores declarados</span></div><div><strong>{c.engagement}%</strong><span>Interacción declarada</span></div><div><strong>{c.scoreLabel ?? formatScoreDisplay(c.score)}</strong><span>KUVO Score</span></div></div>
                 <div className="cardFooter"><p><span>Desde</span><strong>{money.format(c.startingPrice)}</strong></p><button className="smallBtn" onClick={()=>setSelectedCreator(c)}>Ver perfil</button></div>
               </div>
             </article>)}
@@ -284,7 +283,7 @@ export function Marketplace() {
         <button className="modalClose" onClick={()=>setSelectedCreator(null)}><X/></button>
         <div className="profileHero" style={{background:`linear-gradient(135deg,${selectedCreator.gradient[0]},${selectedCreator.gradient[1]})`}}><div className="largeAvatar">{selectedCreator.initials}</div></div>
         <div className="profileBody"><div className="creatorName"><h2>{selectedCreator.name}</h2>{selectedCreator.verified&&<BadgeCheck/>}</div><p className="creatorHandle">{selectedCreator.username} · {selectedCreator.city}</p><p>{selectedCreator.bio}</p>
-        <div className="profileStats"><div><strong>{compact.format(selectedCreator.followers)}</strong><span>Seguidores</span></div><div><strong>{selectedCreator.engagement}%</strong><span>Interacción</span></div><div><strong>{selectedCreator.score}</strong><span>KUVO Score</span></div></div>
+        <div className="profileStats"><div><strong>{compact.format(selectedCreator.followers)}</strong><span>Seguidores declarados</span></div><div><strong>{selectedCreator.engagement}%</strong><span>Interacción declarada</span></div><div><strong>{selectedCreator.scoreLabel ?? formatScoreDisplay(selectedCreator.score)}</strong><span>KUVO Score</span></div></div>
         <h3>Servicios y portfolio</h3><div className="portfolioGrid">{selectedCreator.portfolio.map((x,i)=><div key={x} style={{background:`linear-gradient(135deg,${i%2?selectedCreator.gradient[1]:selectedCreator.gradient[0]},${i%2?selectedCreator.gradient[0]:selectedCreator.gradient[1]})`}}>{x}</div>)}</div>
         <div className="modalActions"><p><span>Precio desde</span><strong>{money.format(selectedCreator.startingPrice)}</strong></p><Link className="primaryBtn" href="/registro">Contactar <ArrowRight size={17}/></Link></div></div>
       </section></div>}

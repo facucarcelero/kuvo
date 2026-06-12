@@ -11,7 +11,8 @@ export type Creator = {
   followers: number;
   engagement: number;
   startingPrice: number;
-  score: number;
+  score: number | null;
+  scoreLabel?: string;
   verified: boolean;
   bio: string;
   initials: string;
@@ -31,7 +32,7 @@ export type Campaign = {
   budgetMax: number;
   deliverables: string[];
   deadline: string;
-  status: 'draft' | 'open' | 'paused' | 'completed' | 'cancelled';
+  status: 'draft' | 'open' | 'paused' | 'in_progress' | 'completed' | 'cancelled';
   applicants?: number;
   gradient: [string, string];
 };

@@ -102,7 +102,7 @@ export function LandingPage() {
               <span><Check/> Panel, mensajes y campañas integrados</span>
             </div>
           </div>
-          <div className="heroPreview" aria-label="Vista del sistema KUVO">
+          <div className="heroPreview" aria-label="Vista ilustrativa del panel">
             <div className="previewTop"><span/><span/><span/><b>Tu panel privado</b></div>
             <div className="previewStats">
               <div><span>Campo visible solo para vos</span><strong>Panel</strong><small><Lock size={13}/> Acceso por rol</small></div>
