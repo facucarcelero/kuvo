@@ -9,9 +9,9 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-  "test:watch": "vitest",
-  "verify:post-migration": "node scripts/verify-post-migration.mjs",
-  "audit:all": "npm audit --audit-level=high",
+    "test:watch": "vitest",
+    "verify:post-migration": "node scripts/verify-post-migration.mjs",
+    "audit:all": "npm audit --audit-level=high",
     "postbuild": "node scripts/prepare-standalone.mjs"
   },
   "dependencies": {
@@ -20,7 +20,8 @@
     "lucide-react": "1.17.0",
     "next": "16.2.9",
     "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react-dom": "19.2.7",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "25.9.3",
@@ -29,7 +30,7 @@
     "eslint": "^9.35.0",
     "eslint-config-next": "16.2.9",
     "typescript": "6.0.3",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.8"
   },
   "overrides": {
     "postcss": "8.5.15"
