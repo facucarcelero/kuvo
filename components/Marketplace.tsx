@@ -8,7 +8,7 @@ import {
   Sparkles, Sun, Target, TrendingUp, Users, X, Zap
 } from 'lucide-react';
 import { Logo } from './Logo';
-import { createClient, isSupabaseConfigured } from '@/lib/supabase/client';
+import { createClient, isDemoMode, isSupabaseConfigured } from '@/lib/supabase/client';
 import { demoCampaigns, demoCreators } from '@/lib/demo';
 import type { Campaign, Creator } from '@/lib/types';
 
@@ -65,8 +65,8 @@ function normalizeCampaign(row: any): Campaign {
 }
 
 export function Marketplace() {
-  const [creators, setCreators] = useState<Creator[]>(demoCreators);
-  const [campaigns, setCampaigns] = useState<Campaign[]>(demoCampaigns);
+  const [creators, setCreators] = useState<Creator[]>([]);
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [view, setView] = useState<'creators'|'campaigns'>('creators');
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('Todas');
@@ -83,17 +83,29 @@ export function Marketplace() {
     try { setFavorites(new Set(JSON.parse(localStorage.getItem('kuvo_favorites') || '[]'))); } catch {}
     const savedTheme = localStorage.getItem('kuvo_theme');
     if (savedTheme === 'light') { setDark(false); document.documentElement.dataset.theme = 'light'; }
+    if (isDemoMode()) {
+      setCreators(demoCreators);
+      setCampaigns(demoCampaigns);
+    }
   }, []);
 
+  const [loadError, setLoadError] = useState('');
+
   useEffect(() => {
+    if (isDemoMode()) return;
     if (!isSupabaseConfigured()) return;
     const supabase = createClient();
     if (!supabase) return;
     setLoading(true);
+    setLoadError('');
     Promise.all([
-      supabase.from('creator_profiles').select('id,profile_id,categories,followers,engagement,starting_price,score,availability,portfolio,profiles!inner(id,full_name,username,city,bio,verified,active,avatar_url)').eq('availability', true).limit(48),
+      supabase.from('creator_profiles').select('id,profile_id,categories,followers,followers_declared,engagement,engagement_declared,starting_price,score,availability,portfolio,profiles!inner(id,full_name,username,city,bio,verified,active,avatar_url)').eq('availability', true).limit(48),
       supabase.from('campaigns').select('id,business_id,title,description,category,city,budget_min,budget_max,deliverables,status,deadline,created_at,business_profiles(id,business_name,verified,profiles(id,full_name,city,verified,active))').eq('status', 'open').limit(48),
     ]).then(([creatorResult, campaignResult]) => {
+      if (creatorResult.error || campaignResult.error) {
+        setLoadError('No pudimos cargar el marketplace. Intentá de nuevo en unos minutos.');
+        return;
+      }
       if (creatorResult.data?.length) setCreators(creatorResult.data.map(normalizeCreator));
       if (campaignResult.data?.length) setCampaigns(campaignResult.data.map(normalizeCampaign));
     }).finally(() => setLoading(false));
@@ -146,10 +158,10 @@ export function Marketplace() {
         <div className="headerInner">
           <Logo />
           <nav className={mobileOpen ? 'mainNav open' : 'mainNav'}>
+            <Link href="/" onClick={()=>setMobileOpen(false)}>Inicio</Link>
             <button onClick={() => switchView('creators')}>Creadores</button>
             <button onClick={() => switchView('campaigns')}>Campañas</button>
-            <a href="#como-funciona" onClick={()=>setMobileOpen(false)}>Cómo funciona</a>
-            <a href="#seguridad" onClick={()=>setMobileOpen(false)}>Seguridad</a>
+            <Link href="/login" onClick={()=>setMobileOpen(false)}>Mi panel</Link>
           </nav>
           <div className="headerActions">
             <button className="iconButton" onClick={toggleTheme} aria-label="Cambiar tema">{dark ? <Sun size={18}/> : <Moon size={18}/>}</button>
@@ -164,15 +176,15 @@ export function Marketplace() {
         <div className="heroGlow one"/><div className="heroGlow two"/>
         <div className="container heroGrid">
           <div className="heroCopy">
-            <span className="eyebrow"><span className="liveDot"/> Colaboraciones simples y medibles</span>
-            <h1>El punto de encuentro entre <em>negocios</em> y <em>creadores</em>.</h1>
-            <p>Descubrí perfiles confiables, publicá campañas, compará propuestas y gestioná cada colaboración desde un único lugar.</p>
+            <span className="eyebrow"><span className="liveDot"/> Marketplace público</span>
+            <h1>Explorá <em>creadores</em> y <em>campañas</em> abiertas.</h1>
+            <p>Esta sección es visible para todos. Para publicar campañas, postularte o ver tus mensajes, ingresá a tu panel privado.</p>
             <div className="heroButtons">
               <button className="primaryBtn large" onClick={()=>switchView('creators')}>Buscar creadores <ArrowRight size={19}/></button>
               <button className="ghostBtn large" onClick={()=>switchView('campaigns')}>Ver campañas</button>
             </div>
             <div className="trustRow">
-              <span><Check/> Perfiles verificados</span><span><Check/> Métricas claras</span><span><Check/> Sin costos ocultos</span>
+              <span><Check/> Catálogo público</span><span><Check/> Perfiles verificados</span><Link href="/registro" className="trustLink">Registrate para gestionar lo tuyo →</Link>
             </div>
           </div>
           <div className="heroPreview" aria-label="Vista previa del panel">
@@ -191,10 +203,10 @@ export function Marketplace() {
 
       <section className="statsBand">
         <div className="container statsGrid">
-          <div><strong>+2.400</strong><span>creadores listos</span></div>
-          <div><strong>+780</strong><span>negocios activos</span></div>
-          <div><strong>94%</strong><span>campañas completadas</span></div>
-          <div><strong>4,9/5</strong><span>satisfacción promedio</span></div>
+          <div><strong>{creators.length}</strong><span>creadores visibles</span></div>
+          <div><strong>{campaigns.length}</strong><span>campañas abiertas</span></div>
+          <div><strong>{categories.length - 1}</strong><span>categorías activas</span></div>
+          <div><strong>{cities.length - 1}</strong><span>ciudades</span></div>
         </div>
       </section>
 
@@ -214,6 +226,7 @@ export function Marketplace() {
           <select value={city} onChange={e=>setCity(e.target.value)} aria-label="Ciudad">{cities.map(x=><option key={x}>{x}</option>)}</select>
         </div>
 
+        {loadError && <div className="formMessage">{loadError}</div>}
         {loading && <div className="loadingLine"/>}
         {view === 'creators' ? (
           <div className="creatorGrid">
@@ -246,26 +259,26 @@ export function Marketplace() {
 
       <section id="como-funciona" className="howSection">
         <div className="container">
-          <div className="sectionHeading centered"><span className="eyebrow"><Zap size={15}/> Fácil de usar</span><h2>De la búsqueda al resultado</h2><p>Un flujo claro para que ninguna colaboración se pierda en mensajes sueltos.</p></div>
+          <div className="sectionHeading centered"><span className="eyebrow"><Zap size={15}/> ¿Querés más?</span><h2>El marketplace es solo la parte pública</h2><p>Registrate para acceder a campañas, postulaciones, mensajes y panel privado con tus datos protegidos.</p></div>
           <div className="stepsGrid">
-            <article><span>01</span><Search/><h3>Descubrí</h3><p>Encontrá perfiles o campañas con filtros relevantes.</p></article>
-            <article><span>02</span><MessageCircle/><h3>Conectá</h3><p>Enviá propuestas, compará condiciones y conversá.</p></article>
-            <article><span>03</span><Target/><h3>Gestioná</h3><p>Centralizá entregables, fechas y estados.</p></article>
-            <article><span>04</span><BarChart3/><h3>Medí</h3><p>Registrá resultados y construí reputación.</p></article>
+            <article><span>01</span><Search/><h3>Explorá</h3><p>Filtrá creadores y campañas abiertas sin cuenta.</p></article>
+            <article><span>02</span><MessageCircle/><h3>Registrate</h3><p>Elegí rol negocio o creador y completá tu perfil.</p></article>
+            <article><span>03</span><Target/><h3>Gestioná</h3><p>Publicá, postulate y seguí estados desde /panel.</p></article>
+            <article><span>04</span><BarChart3/><h3>Medí</h3><p>Construí reputación con KUVO Score y reseñas.</p></article>
           </div>
         </div>
       </section>
 
       <section id="seguridad" className="securitySection container">
         <div className="securityCard">
-          <div><span className="eyebrow"><ShieldCheck size={15}/> Confianza por diseño</span><h2>Perfiles, acuerdos y datos protegidos.</h2><p>KUVO separa la información pública de la privada, controla el acceso por rol y guarda el historial de cada campaña.</p><ul><li><Check/> Base de datos con reglas de acceso por usuario</li><li><Check/> Negocios y creadores con reputación visible</li><li><Check/> Mensajes y postulaciones disponibles solo para las partes</li></ul></div>
-          <div className="securityVisual"><ShieldCheck size={80}/><strong>RLS</strong><span>Protección a nivel de base de datos</span></div>
+          <div><span className="eyebrow"><ShieldCheck size={15}/> Lo público vs lo privado</span><h2>Acá ves el catálogo. En tu panel, lo tuyo.</h2><p>Postulaciones, mensajes y favoritos no son visibles para otros usuarios. Cada cuenta accede solo a su información.</p><ul><li><Check/> Perfiles y campañas abiertas: visibles para todos</li><li><Check/> Panel, mensajes y postulaciones: solo para vos</li><li><Check/> Protección con reglas de acceso en la base de datos</li></ul></div>
+          <div className="securityVisual"><ShieldCheck size={80}/><strong>RLS</strong><span>Privacidad por usuario</span></div>
         </div>
       </section>
 
       <section className="ctaSection container"><div><span className="eyebrow"><Sparkles size={15}/> Crecé con mejores colaboraciones</span><h2>Tu próxima campaña puede empezar hoy.</h2><p>Registrate como negocio o creador y completá tu perfil profesional.</p><Link className="primaryBtn large" href="/registro">Crear cuenta gratis <ChevronRight size={19}/></Link></div></section>
 
-      <footer><div className="container footerGrid"><div><Logo/><p>Conectamos negocios con creadores de forma simple, profesional y medible.</p></div><div><h4>Plataforma</h4><button onClick={()=>switchView('creators')}>Creadores</button><button onClick={()=>switchView('campaigns')}>Campañas</button><Link href="/panel">Panel</Link></div><div><h4>Cuenta</h4><Link href="/login">Ingresar</Link><Link href="/registro">Registrarse</Link><Link href="/admin">Administración</Link></div><div><h4>Legal</h4><Link href="/privacidad">Privacidad</Link><Link href="/terminos">Términos</Link><a href="#seguridad">Seguridad</a></div></div><div className="container footerBottom"><span>© 2026 KUVO. Todos los derechos reservados.</span><span>Hecho para negocios y creadores.</span></div></footer>
+      <footer><div className="container footerGrid"><div><Logo/><p>Marketplace público de KUVO. Para gestionar campañas y mensajes privados, ingresá a tu panel.</p></div><div><h4>Plataforma</h4><Link href="/">Inicio</Link><button onClick={()=>switchView('creators')}>Creadores</button><button onClick={()=>switchView('campaigns')}>Campañas</button></div><div><h4>Cuenta</h4><Link href="/login">Ingresar</Link><Link href="/registro">Registrarse</Link><Link href="/panel">Mi panel</Link></div><div><h4>Legal</h4><Link href="/privacidad">Privacidad</Link><Link href="/terminos">Términos</Link><a href="#seguridad">Seguridad</a></div></div><div className="container footerBottom"><span>© 2026 KUVO. Todos los derechos reservados.</span><span>Marketplace público · gestión privada en /panel</span></div></footer>
 
       {selectedCreator && <div className="modalBackdrop" onMouseDown={e=>e.target===e.currentTarget&&setSelectedCreator(null)}><section className="profileModal">
         <button className="modalClose" onClick={()=>setSelectedCreator(null)}><X/></button>

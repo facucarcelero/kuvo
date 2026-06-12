@@ -10,7 +10,7 @@ import {
   Users, X
 } from 'lucide-react';
 import { Logo } from './Logo';
-import { createClient, isSupabaseConfigured } from '@/lib/supabase/client';
+import { createClient, isDemoMode, isSupabaseConfigured } from '@/lib/supabase/client';
 import { demoApplications, demoCampaigns, demoCreators } from '@/lib/demo';
 import type { Application, Campaign, Role } from '@/lib/types';
 
@@ -60,7 +60,7 @@ export function Dashboard() {
   useEffect(() => { void loadSession(); }, []);
 
   async function loadSession() {
-    if (!isSupabaseConfigured()) {
+    if (isDemoMode()) {
       let demo: any = null;
       try { demo = JSON.parse(localStorage.getItem('kuvo_demo_session') || 'null'); } catch {}
       setProfile({ id:'demo-profile', name:demo?.name || 'Cuenta Demo', email:demo?.email || 'demo@kuvo.app', role:demo?.role || 'business', city:'San Juan', bio:'Perfil de demostración de KUVO.', username:'cuentademo', businessName:'Estudio Norte', businessId:'demo-business', creatorId:'cr-5', category:'Lifestyle' });
@@ -96,15 +96,15 @@ export function Dashboard() {
 
   const isBusiness = profile?.role === 'business' || profile?.role === 'admin';
   const metrics = useMemo(() => isBusiness ? [
-    { label:'Campañas activas', value:String(campaigns.filter(c=>c.status==='open').length), change:'+1 este mes', icon:BriefcaseBusiness },
-    { label:'Postulaciones', value:String(applications.length), change:'+12,5%', icon:Users },
-    { label:'Inversión estimada', value:money.format(campaigns.reduce((s,c)=>s+c.budgetMax,0)), change:'Presupuesto total', icon:CircleDollarSign },
-    { label:'Tasa de respuesta', value:'92%', change:'+4,2%', icon:TrendingUp },
+    { label:'Campañas activas', value:String(campaigns.filter(c=>c.status==='open').length), change:'En tu cuenta', icon:BriefcaseBusiness },
+    { label:'Postulaciones', value:String(applications.length), change:'Total registradas', icon:Users },
+    { label:'Inversión estimada', value:money.format(campaigns.reduce((s,c)=>s+c.budgetMax,0)), change:'Presupuesto publicado', icon:CircleDollarSign },
+    { label:'Pendientes', value:String(applications.filter(a=>a.status==='pending').length), change:'Por revisar', icon:TrendingUp },
   ] : [
-    { label:'Postulaciones', value:String(applications.length), change:'+2 esta semana', icon:FileText },
-    { label:'Aceptadas', value:String(applications.filter(a=>a.status==='accepted').length), change:'Buen rendimiento', icon:CheckCircle2 },
+    { label:'Postulaciones', value:String(applications.length), change:'Enviadas', icon:FileText },
+    { label:'Aceptadas', value:String(applications.filter(a=>a.status==='accepted').length), change:'Confirmadas', icon:CheckCircle2 },
     { label:'Ingresos potenciales', value:money.format(applications.reduce((s,a)=>s+a.proposedPrice,0)), change:'Propuestas enviadas', icon:CircleDollarSign },
-    { label:'KUVO Score', value:'91', change:'+3 puntos', icon:TrendingUp },
+    { label:'Pendientes', value:String(applications.filter(a=>a.status==='pending').length), change:'En revisión', icon:TrendingUp },
   ], [isBusiness, campaigns, applications]);
 
   function notify(message:string) { setToast(message); setTimeout(()=>setToast(''),2500); }
@@ -167,9 +167,19 @@ export function Dashboard() {
     notify('Postulación enviada correctamente');
   }
 
-  async function updateApplication(id:string,status:Application['status']) {
-    if (isSupabaseConfigured()) await createClient()?.from('applications').update({ status }).eq('id', id);
-    setApplications(v=>v.map(a=>a.id===id?{...a,status}:a)); notify(`Postulación ${status==='accepted'?'aceptada':status==='rejected'?'rechazada':'actualizada'}`);
+  async function updateApplication(id:string, action:'accepted'|'rejected'|'shortlisted') {
+    if (isSupabaseConfigured()) {
+      const supabase = createClient();
+      const rpcMap = {
+        accepted: 'business_accept_application',
+        rejected: 'business_reject_application',
+        shortlisted: 'business_shortlist_application',
+      } as const;
+      const { error } = await supabase!.rpc(rpcMap[action], { p_application_id: id });
+      if (error) { notify(error.message); return; }
+    }
+    setApplications(v=>v.map(a=>a.id===id?{...a,status:action}:a));
+    notify(`Postulación ${action==='accepted'?'aceptada':action==='rejected'?'rechazada':'preseleccionada'}`);
   }
 
   async function saveProfile(event:FormEvent<HTMLFormElement>) {
@@ -212,14 +222,14 @@ export function Dashboard() {
 
       <div className="dashContent">
         {tab==='overview'&&<>
-          <div className="welcomeCard"><div><span className="eyebrow"><Sparkles size={14}/> Tu actividad en KUVO</span><h2>Hola, {profile.name.split(' ')[0]}.</h2><p>{isBusiness?'Tenés nuevas postulaciones esperando una respuesta.':'Hay campañas nuevas que coinciden con tu perfil.'}</p><button className="primaryBtn" onClick={()=>isBusiness?setCampaignModal(true):nav('campaigns')}>{isBusiness?<><Plus size={18}/> Nueva campaña</>:<>Explorar campañas <ChevronRight size={18}/></>}</button></div><div className="welcomeVisual"><Target size={78}/><span>{isBusiness?'3 campañas':'91 puntos'}</span><small>{isBusiness?'en seguimiento':'KUVO Score'}</small></div></div>
+          <div className="welcomeCard"><div><span className="eyebrow"><Sparkles size={14}/> Tu actividad en KUVO</span><h2>Hola, {profile.name.split(' ')[0]}.</h2><p>{isBusiness?'Gestioná campañas y postulaciones desde tu panel privado.':'Explorá oportunidades y seguí el estado de tus postulaciones.'}</p><button className="primaryBtn" onClick={()=>isBusiness?setCampaignModal(true):nav('campaigns')}>{isBusiness?<><Plus size={18}/> Nueva campaña</>:<>Explorar campañas <ChevronRight size={18}/></>}</button></div><div className="welcomeVisual"><Target size={78}/><span>{applications.length}</span><small>{isBusiness?'postulaciones':'movimientos'}</small></div></div>
           <div className="metricGrid">{metrics.map(({label,value,change,icon:Icon})=><article key={label}><span><Icon/></span><p>{label}</p><strong>{value}</strong><small>{change}</small></article>)}</div>
-          <div className="dashboardColumns"><section className="dashPanel"><div className="panelTitle"><div><h3>{isBusiness?'Campañas recientes':'Oportunidades para vos'}</h3><p>Actividad actual de la cuenta</p></div><button onClick={()=>nav('campaigns')}>Ver todas</button></div><div className="compactCampaigns">{campaigns.slice(0,4).map(c=><button key={c.id} onClick={()=>nav('campaigns')}><span style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}>{c.businessName.slice(0,2).toUpperCase()}</span><p><strong>{c.title}</strong><small>{c.category} · {c.city}</small></p><i className={`status ${c.status}`}>{c.status==='open'?'Activa':c.status}</i><b>{money.format(c.budgetMax)}</b><ChevronRight/></button>)}</div></section><section className="dashPanel"><div className="panelTitle"><div><h3>Rendimiento</h3><p>Últimos 30 días</p></div></div><div className="miniChart"><div className="chartLabels"><span>100</span><span>75</span><span>50</span><span>25</span></div><svg viewBox="0 0 500 180" preserveAspectRatio="none"><defs><linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#8b5cf6" stopOpacity=".45"/><stop offset="1" stopColor="#8b5cf6" stopOpacity="0"/></linearGradient></defs><path d="M0 150 C55 138,70 92,120 105 S190 132,230 76 S310 48,350 72 S430 20,500 38 L500 180 L0 180Z" fill="url(#chartFill)"/><path d="M0 150 C55 138,70 92,120 105 S190 132,230 76 S310 48,350 72 S430 20,500 38" fill="none" stroke="#8b5cf6" strokeWidth="5" strokeLinecap="round"/></svg></div><div className="chartSummary"><div><strong>+28%</strong><span>Visibilidad</span></div><div><strong>+17%</strong><span>Respuestas</span></div><div><strong>4,8</strong><span>Reputación</span></div></div></section></div>
+          <div className="dashboardColumns"><section className="dashPanel"><div className="panelTitle"><div><h3>{isBusiness?'Campañas recientes':'Oportunidades para vos'}</h3><p>Actividad actual de la cuenta</p></div><button onClick={()=>nav('campaigns')}>Ver todas</button></div><div className="compactCampaigns">{campaigns.slice(0,4).map(c=><button key={c.id} onClick={()=>nav('campaigns')}><span style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}>{c.businessName.slice(0,2).toUpperCase()}</span><p><strong>{c.title}</strong><small>{c.category} · {c.city}</small></p><i className={`status ${c.status}`}>{c.status==='open'?'Activa':c.status}</i><b>{money.format(c.budgetMax)}</b><ChevronRight/></button>)}</div></section><section className="dashPanel"><div className="panelTitle"><div><h3>Resumen</h3><p>Datos de tu cuenta</p></div></div><div className="chartSummary"><div><strong>{applications.filter(a=>a.status==='accepted').length}</strong><span>Aceptadas</span></div><div><strong>{applications.filter(a=>a.status==='pending').length}</strong><span>Pendientes</span></div><div><strong>{campaigns.filter(c=>c.status==='open').length}</strong><span>Campañas abiertas</span></div></div></section></div>
         </>}
 
         {tab==='campaigns'&&<><div className="contentToolbar"><label><Search/><input placeholder="Buscar campañas"/></label><select><option>Todas</option><option>Activas</option><option>Pausadas</option><option>Completadas</option></select>{isBusiness&&<button className="primaryBtn" onClick={()=>setCampaignModal(true)}><Plus/> Nueva campaña</button>}</div><div className="dashCampaignGrid">{campaigns.map(c=><article key={c.id}><div className="dashCampaignTop"><span style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}>{c.businessName.slice(0,2).toUpperCase()}</span><i className={`status ${c.status}`}>{c.status==='open'?'Activa':c.status}</i></div><small>{c.businessName}</small><h3>{c.title}</h3><p>{c.description}</p><div className="tagRow"><span>{c.category}</span><span>{c.city}</span></div><div className="campaignNumbers"><div><span>Presupuesto</span><strong>{money.format(c.budgetMax)}</strong></div><div><span>Postulantes</span><strong>{c.applicants ?? applications.filter(a=>a.campaignId===c.id).length}</strong></div></div><button className="ghostBtn full" onClick={()=>isBusiness?nav('applications'):setApplyCampaign(c)}>{isBusiness?'Ver postulaciones':'Postularme'}<ChevronRight/></button></article>)}</div></>}
 
-        {tab==='applications'&&<section className="dashPanel applicationPanel"><div className="panelTitle"><div><h3>{isBusiness?'Postulaciones recibidas':'Mis postulaciones'}</h3><p>{applications.length} movimientos registrados</p></div></div><div className="applicationTable"><div className="tableHead"><span>{isBusiness?'Creador':'Campaña'}</span><span>Propuesta</span><span>Estado</span><span>Fecha</span><span>Acciones</span></div>{applications.map(a=><div className="tableRow" key={a.id}><div className="applicationPerson"><span>{(isBusiness?a.creatorName:a.campaignTitle).split(' ').map(x=>x[0]).slice(0,2).join('')}</span><p><strong>{isBusiness?a.creatorName:a.campaignTitle}</strong><small>{isBusiness?a.campaignTitle:a.message}</small></p></div><strong>{money.format(a.proposedPrice)}</strong><i className={`status ${a.status}`}>{a.status==='pending'?'Pendiente':a.status==='shortlisted'?'Preseleccionada':a.status==='accepted'?'Aceptada':'Rechazada'}</i><span>{new Date(a.createdAt).toLocaleDateString('es-AR')}</span><div className="rowActions">{isBusiness&&a.status!=='accepted'&&<><button title="Aceptar" onClick={()=>updateApplication(a.id,'accepted')}><Check/></button><button title="Rechazar" onClick={()=>updateApplication(a.id,'rejected')}><X/></button></>}<button title="Mensaje" onClick={()=>nav('messages')}><MessageCircle/></button></div></div>)}</div></section>}
+        {tab==='applications'&&<section className="dashPanel applicationPanel"><div className="panelTitle"><div><h3>{isBusiness?'Postulaciones recibidas':'Mis postulaciones'}</h3><p>{applications.length} movimientos registrados</p></div></div><div className="applicationTable"><div className="tableHead"><span>{isBusiness?'Creador':'Campaña'}</span><span>Propuesta</span><span>Estado</span><span>Fecha</span><span>Acciones</span></div>{applications.map(a=><div className="tableRow" key={a.id}><div className="applicationPerson"><span>{(isBusiness?a.creatorName:a.campaignTitle).split(' ').map(x=>x[0]).slice(0,2).join('')}</span><p><strong>{isBusiness?a.creatorName:a.campaignTitle}</strong><small>{isBusiness?a.campaignTitle:a.message}</small></p></div><strong>{money.format(a.proposedPrice)}</strong><i className={`status ${a.status}`}>{a.status==='pending'?'Pendiente':a.status==='shortlisted'?'Preseleccionada':a.status==='accepted'?'Aceptada':'Rechazada'}</i><span>{new Date(a.createdAt).toLocaleDateString('es-AR')}</span><div className="rowActions">{isBusiness&&a.status!=='accepted'&&<><button title="Preseleccionar" onClick={()=>updateApplication(a.id,'shortlisted')}><BadgeCheck/></button><button title="Aceptar" onClick={()=>updateApplication(a.id,'accepted')}><Check/></button><button title="Rechazar" onClick={()=>updateApplication(a.id,'rejected')}><X/></button></>}<button title="Mensaje" onClick={()=>nav('messages')}><MessageCircle/></button></div></div>)}</div></section>}
 
         {tab==='messages'&&<div className="messagesLayout"><aside className="conversationList"><div className="conversationSearch"><Search/><input placeholder="Buscar conversación"/></div>{demoMessages.map(m=><button key={m.id} className={chat.id===m.id?'active':''} onClick={()=>setChat(m)}><span>{m.initials}</span><p><strong>{m.name}</strong><small>{m.text}</small></p><time>{m.time}</time>{m.unread>0&&<b>{m.unread}</b>}</button>)}</aside><section className="chatPanel"><header><span>{chat.initials}</span><p><strong>{chat.name}</strong><small><i/> En línea</small></p><button><FileText/></button></header><div className="chatBody">{chatMessages.map((m,i)=><div key={i} className={m.mine?'mine':''}><p>{m.text}</p><time>{m.time}</time></div>)}</div><form onSubmit={sendMessage}><input name="message" placeholder="Escribí un mensaje..." autoComplete="off"/><button><Send/></button></form></section></div>}
 

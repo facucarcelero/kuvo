@@ -4,7 +4,7 @@ import './globals.css';
 export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.SITE_URL || process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000'),
+  metadataBase: new URL(process.env.SITE_URL || process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:1000'),
   title: { default: 'KUVO — Negocios + Creadores', template: '%s | KUVO' },
   description: 'Marketplace profesional que conecta negocios con creadores para gestionar campañas, propuestas y resultados.',
   applicationName: 'KUVO',
@@ -39,6 +39,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   const runtimeConfig = {
     supabaseUrl: process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '',
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
+    demoMode: process.env.NEXT_PUBLIC_DEMO_MODE === 'true',
   };
   const serialized = JSON.stringify(runtimeConfig).replace(/</g, '\u003c');
   const bootScript = `window.__KUVO_CONFIG__=${serialized};if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}))}`;

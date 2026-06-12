@@ -1,4 +1,5 @@
--- Datos públicos de muestra. Se pueden borrar después de cargar perfiles reales.
+-- Datos públicos de muestra para desarrollo/demo.
+-- NO ejecutar en producción. Usar solo en entornos locales o staging.
 insert into public.profiles (id,role,full_name,username,city,bio,verified,active) values
 ('10000000-0000-0000-0000-000000000001','creator','Vale López','valelopez','Buenos Aires','Moda, belleza y lifestyle con contenido auténtico y orientado a conversión.',true,true),
 ('10000000-0000-0000-0000-000000000002','creator','Santi Ríos','santirios','Córdoba','Entrenamiento, hábitos y reseñas honestas para comunidades activas.',true,true),

@@ -1,4 +1,8 @@
 -- KUVO — esquema principal para Supabase/PostgreSQL
+--
+-- ⚠️  SOLO para proyectos VACÍOS. Si ya existe la base (error "account_role already exists"),
+--     NO ejecutes este archivo. Usá únicamente: supabase/migrations/003_security_hardening.sql
+--
 create extension if not exists pgcrypto;
 
 create type public.account_role as enum ('business','creator','admin');

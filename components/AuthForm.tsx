@@ -4,7 +4,7 @@ import { FormEvent, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowRight, Building2, Eye, EyeOff, Loader2, Sparkles, UserRound } from 'lucide-react';
-import { createClient, isSupabaseConfigured } from '@/lib/supabase/client';
+import { createClient, isDemoMode, isSupabaseConfigured } from '@/lib/supabase/client';
 import type { Role } from '@/lib/types';
 
 export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
@@ -23,9 +23,15 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
     const password = String(data.get('password') || '');
     const name = String(data.get('name') || '').trim();
 
-    if (!isSupabaseConfigured()) {
+    if (isDemoMode()) {
       localStorage.setItem('kuvo_demo_session', JSON.stringify({ email, name: name || 'Cuenta demo', role }));
       setTimeout(() => router.push('/panel'), 350);
+      return;
+    }
+
+    if (!isSupabaseConfigured()) {
+      setMessage('Supabase no está configurado. Activá NEXT_PUBLIC_DEMO_MODE=true para pruebas locales sin backend.');
+      setLoading(false);
       return;
     }
 
@@ -87,7 +93,12 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
       <div className="authSwitch">
         {mode === 'login' ? <>¿Todavía no tenés cuenta? <Link href="/registro">Registrate</Link></> : <>¿Ya tenés una cuenta? <Link href="/login">Ingresá</Link></>}
       </div>
-      {!isSupabaseConfigured() && <div className="demoNotice">Modo demostración activo: podés ingresar con cualquier correo y contraseña.</div>}
+      {!isSupabaseConfigured() && isDemoMode() && (
+        <div className="demoNotice">Modo demostración activo: podés ingresar con cualquier correo y contraseña.</div>
+      )}
+      {!isSupabaseConfigured() && !isDemoMode() && (
+        <div className="demoNotice">Backend no configurado. Completá las variables de Supabase o activá NEXT_PUBLIC_DEMO_MODE=true.</div>
+      )}
     </div>
   );
 }

@@ -1,12 +1,34 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { sanitizeInternalRedirect } from '@/lib/auth/redirect';
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get('code');
-  const next = url.searchParams.get('next') || '/panel';
+  const error = url.searchParams.get('error_description') || url.searchParams.get('error');
+  const next = sanitizeInternalRedirect(url.searchParams.get('next'));
+
+  if (error) {
+    const loginUrl = new URL('/login', url.origin);
+    loginUrl.searchParams.set('error', error);
+    return NextResponse.redirect(loginUrl);
+  }
+
   if (code) {
     const supabase = await createClient();
-    await supabase?.auth.exchangeCodeForSession(code);
+    if (!supabase) {
+      const loginUrl = new URL('/login', url.origin);
+      loginUrl.searchParams.set('error', 'auth_unavailable');
+      return NextResponse.redirect(loginUrl);
+    }
+
+    const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+    if (exchangeError) {
+      const loginUrl = new URL('/login', url.origin);
+      loginUrl.searchParams.set('error', 'auth_callback_failed');
+      return NextResponse.redirect(loginUrl);
+    }
   }
+
   return NextResponse.redirect(new URL(next, url.origin));
 }

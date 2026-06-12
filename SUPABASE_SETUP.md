@@ -2,7 +2,25 @@
 
 ## 1. Ejecutar migraciones
 
-Ejecutar `001_schema.sql` y luego `002_seed.sql` desde SQL Editor.
+### Proyecto NUEVO (Supabase vacío)
+
+1. `supabase/migrations/001_schema.sql`
+2. `supabase/migrations/003_security_hardening.sql`
+3. `002_seed.sql` **solo en desarrollo** (no producción)
+
+### Proyecto EXISTENTE (ya corriste 001 antes)
+
+**No vuelvas a ejecutar 001.** Si ves `type "account_role" already exists`, es porque 001 ya está aplicado.
+
+Ejecutá **solo**:
+
+```
+supabase/migrations/003_security_hardening.sql
+```
+
+Validá con `supabase/tests/verify_schema_003.sql` y luego `npm run verify:post-migration`.
+
+Alternativa instalación completa desde cero: `supabase/KUVO_DATABASE_COMPLETE.sql` (incluye 001+003; **no** usar si 001 ya existe).
 
 ## 2. Autenticación
 
