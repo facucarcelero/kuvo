@@ -5,7 +5,7 @@ import Link from 'next/link';
 import {
   ArrowRight, BadgeCheck, BarChart3, BriefcaseBusiness, Check, ChevronRight,
   Heart, MapPin, Menu, MessageCircle, Moon, Search, ShieldCheck,
-  Sparkles, Sun, Target, TrendingUp, Users, X, Zap
+  Sparkles, Sun, Target, Users, X, Zap
 } from 'lucide-react';
 import { Logo } from './Logo';
 import { createClient, isDemoMode, isSupabaseConfigured } from '@/lib/supabase/client';

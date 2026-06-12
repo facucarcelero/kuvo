@@ -1,5 +1,85 @@
--- KUVO 004 — Endurecimiento de producción (V1)
--- Ejecutar en bases con 001 + 003 aplicados. Idempotente donde es posible.
+-- KUVO 005 — Endurecimiento de producción (V1)
+-- Requisitos: 001 + 003 aplicados, y 004_add_campaign_in_progress.sql ejecutado en sesión previa.
+
+-- ---------------------------------------------------------------------------
+-- Flags transaccionales internos (solo funciones SECURITY DEFINER)
+-- ---------------------------------------------------------------------------
+create or replace function public.guard_profile_sensitive_fields()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if current_setting('kuvo.bootstrap_admin', true) = 'on' then
+    return new;
+  end if;
+  if not public.is_admin() then
+    if new.role is distinct from old.role then
+      raise exception 'No tenés permiso para modificar el rol.';
+    end if;
+    if new.verified is distinct from old.verified then
+      raise exception 'No tenés permiso para modificar la verificación.';
+    end if;
+    if new.active is distinct from old.active then
+      raise exception 'No tenés permiso para modificar el estado activo.';
+    end if;
+    if new.account_id is distinct from old.account_id then
+      raise exception 'No tenés permiso para modificar account_id.';
+    end if;
+    if new.id is distinct from old.id then
+      raise exception 'No tenés permiso para modificar id.';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.guard_application_fields()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  v_is_creator boolean;
+begin
+  if public.is_admin() then
+    return new;
+  end if;
+
+  if current_setting('kuvo.allow_application_status', true) <> 'on' then
+    if new.status is distinct from old.status then
+      raise exception 'Los cambios de estado solo pueden hacerse mediante RPC.';
+    end if;
+  end if;
+
+  v_is_creator := exists(
+    select 1 from public.creator_profiles c
+    where c.id = old.creator_id and c.profile_id = public.current_profile_id()
+  );
+
+  if new.campaign_id is distinct from old.campaign_id
+     or new.creator_id is distinct from old.creator_id then
+    raise exception 'No podés modificar la campaña o el creador de una postulación.';
+  end if;
+
+  if v_is_creator then
+    if old.status <> 'pending' then
+      raise exception 'Solo podés editar postulaciones pendientes.';
+    end if;
+    if new.message is distinct from old.message
+       or new.proposed_price is distinct from old.proposed_price then
+      null;
+    end if;
+  else
+    if new.message is distinct from old.message
+       or new.proposed_price is distinct from old.proposed_price then
+      raise exception 'No podés modificar la propuesta del creador.';
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
 
 -- ---------------------------------------------------------------------------
 -- 1.1 Cuenta activa
@@ -48,9 +128,13 @@ begin
     raise exception 'No se encontró perfil para el correo indicado.';
   end if;
 
+  perform set_config('kuvo.bootstrap_admin', 'on', true);
+
   update public.profiles
   set role = 'admin', verified = true, updated_at = now()
   where id = v_profile_id;
+
+  perform set_config('kuvo.bootstrap_admin', 'off', true);
 
   insert into public.platform_audit_logs(actor_profile_id, action, entity_type, entity_id, metadata)
   values (
@@ -64,7 +148,7 @@ end;
 $$;
 
 revoke all on function public.bootstrap_first_admin(text) from public;
--- Sin GRANT a anon/authenticated: ejecutar solo como postgres en SQL Editor.
+revoke all on function public.bootstrap_first_admin(text) from anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- 1.3 Auditoría protegida
@@ -73,15 +157,8 @@ revoke all on function public.write_audit_log(text, text, uuid, jsonb) from auth
 revoke all on function public._notify_account(uuid, text, text, text) from authenticated, anon, public;
 
 -- ---------------------------------------------------------------------------
--- 1.4 Estado in_progress + unicidad
+-- 1.4 Unicidad aceptación / conversación
 -- ---------------------------------------------------------------------------
-do $$
-begin
-  alter type public.campaign_status add value if not exists 'in_progress';
-exception
-  when duplicate_object then null;
-end $$;
-
 create unique index if not exists applications_one_accepted_per_campaign_idx
   on public.applications (campaign_id)
   where status = 'accepted';
@@ -89,6 +166,17 @@ create unique index if not exists applications_one_accepted_per_campaign_idx
 create unique index if not exists conversations_one_per_campaign_idx
   on public.conversations (campaign_id)
   where campaign_id is not null;
+
+-- ---------------------------------------------------------------------------
+-- Permisos por columna: campañas y postulaciones
+-- ---------------------------------------------------------------------------
+revoke update on public.campaigns from authenticated;
+grant update (title, description, category, city, budget_min, budget_max, deliverables, deadline)
+  on public.campaigns to authenticated;
+
+revoke update on public.applications from authenticated;
+grant update (message, proposed_price)
+  on public.applications to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Tabla reports (moderación)
@@ -127,6 +215,9 @@ create policy "admins update reports"
   on public.reports for update
   using (public.is_admin());
 
+revoke all on public.reports from anon;
+grant select, insert on public.reports to authenticated;
+
 -- ---------------------------------------------------------------------------
 -- Helper: transiciones de campaña
 -- ---------------------------------------------------------------------------
@@ -158,6 +249,24 @@ $$;
 
 revoke all on function public._assert_campaign_transition(public.campaign_status, public.campaign_status) from public;
 
+create or replace function public._set_campaign_status(p_campaign_id uuid, p_to public.campaign_status)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_campaign public.campaigns%rowtype;
+begin
+  select * into v_campaign from public.campaigns where id = p_campaign_id for update;
+  if not found then raise exception 'Campaña no encontrada.'; end if;
+  perform public._assert_campaign_transition(v_campaign.status, p_to);
+  update public.campaigns set status = p_to, updated_at = now() where id = p_campaign_id;
+end;
+$$;
+
+revoke all on function public._set_campaign_status(uuid, public.campaign_status) from public;
+
 -- ---------------------------------------------------------------------------
 -- RPC campañas
 -- ---------------------------------------------------------------------------
@@ -173,84 +282,49 @@ begin
   if not public.is_active_account() and not public.is_admin() then
     raise exception 'Cuenta bloqueada o sin perfil.';
   end if;
-
   select * into v_campaign from public.campaigns where id = p_campaign_id for update;
   if not found then raise exception 'Campaña no encontrada.'; end if;
-
   if not exists(
     select 1 from public.business_profiles b
-    where b.id = v_campaign.business_id and b.profile_id = public.current_profile_id()
+    join public.profiles p on p.id = b.profile_id
+    where b.id = v_campaign.business_id and b.profile_id = public.current_profile_id() and p.active = true
   ) and not public.is_admin() then
     raise exception 'No autorizado.';
   end if;
-
-  perform public._assert_campaign_transition(v_campaign.status, 'open');
-  update public.campaigns set status = 'open', updated_at = now() where id = p_campaign_id;
+  perform public._set_campaign_status(p_campaign_id, 'open');
   perform public.write_audit_log('business_publish_campaign', 'campaigns', p_campaign_id, '{}'::jsonb);
 end;
 $$;
 
 create or replace function public.business_pause_campaign(p_campaign_id uuid)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_campaign public.campaigns%rowtype;
+returns void language plpgsql security definer set search_path = public as $$
 begin
   if not public.is_active_account() and not public.is_admin() then raise exception 'Cuenta bloqueada o sin perfil.'; end if;
-  select * into v_campaign from public.campaigns where id = p_campaign_id for update;
-  if not found then raise exception 'Campaña no encontrada.'; end if;
-  if not exists(select 1 from public.business_profiles b where b.id = v_campaign.business_id and b.profile_id = public.current_profile_id()) and not public.is_admin() then
+  if not exists(select 1 from public.campaigns ca join public.business_profiles b on b.id = ca.business_id where ca.id = p_campaign_id and b.profile_id = public.current_profile_id()) and not public.is_admin() then
     raise exception 'No autorizado.';
   end if;
-  perform public._assert_campaign_transition(v_campaign.status, 'paused');
-  update public.campaigns set status = 'paused', updated_at = now() where id = p_campaign_id;
-end;
-$$;
+  perform public._set_campaign_status(p_campaign_id, 'paused');
+end; $$;
 
 create or replace function public.business_reopen_campaign(p_campaign_id uuid)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_campaign public.campaigns%rowtype;
+returns void language plpgsql security definer set search_path = public as $$
 begin
   if not public.is_active_account() and not public.is_admin() then raise exception 'Cuenta bloqueada o sin perfil.'; end if;
-  select * into v_campaign from public.campaigns where id = p_campaign_id for update;
-  if not found then raise exception 'Campaña no encontrada.'; end if;
-  if not exists(select 1 from public.business_profiles b where b.id = v_campaign.business_id and b.profile_id = public.current_profile_id()) and not public.is_admin() then
+  if not exists(select 1 from public.campaigns ca join public.business_profiles b on b.id = ca.business_id where ca.id = p_campaign_id and b.profile_id = public.current_profile_id()) and not public.is_admin() then
     raise exception 'No autorizado.';
   end if;
-  perform public._assert_campaign_transition(v_campaign.status, 'open');
-  update public.campaigns set status = 'open', updated_at = now() where id = p_campaign_id;
-end;
-$$;
+  perform public._set_campaign_status(p_campaign_id, 'open');
+end; $$;
 
 create or replace function public.business_cancel_campaign(p_campaign_id uuid)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_campaign public.campaigns%rowtype;
-  v_target public.campaign_status;
+returns void language plpgsql security definer set search_path = public as $$
 begin
   if not public.is_active_account() and not public.is_admin() then raise exception 'Cuenta bloqueada o sin perfil.'; end if;
-  select * into v_campaign from public.campaigns where id = p_campaign_id for update;
-  if not found then raise exception 'Campaña no encontrada.'; end if;
-  if not exists(select 1 from public.business_profiles b where b.id = v_campaign.business_id and b.profile_id = public.current_profile_id()) and not public.is_admin() then
+  if not exists(select 1 from public.campaigns ca join public.business_profiles b on b.id = ca.business_id where ca.id = p_campaign_id and b.profile_id = public.current_profile_id()) and not public.is_admin() then
     raise exception 'No autorizado.';
   end if;
-  v_target := 'cancelled';
-  perform public._assert_campaign_transition(v_campaign.status, v_target);
-  update public.campaigns set status = v_target, updated_at = now() where id = p_campaign_id;
-end;
-$$;
+  perform public._set_campaign_status(p_campaign_id, 'cancelled');
+end; $$;
 
 create or replace function public.business_complete_campaign(p_campaign_id uuid)
 returns void
@@ -258,41 +332,50 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-  v_campaign public.campaigns%rowtype;
 begin
   if not public.is_active_account() and not public.is_admin() then raise exception 'Cuenta bloqueada o sin perfil.'; end if;
-  select * into v_campaign from public.campaigns where id = p_campaign_id for update;
-  if not found then raise exception 'Campaña no encontrada.'; end if;
-  if not exists(select 1 from public.business_profiles b where b.id = v_campaign.business_id and b.profile_id = public.current_profile_id()) and not public.is_admin() then
+  if not exists(select 1 from public.campaigns ca join public.business_profiles b on b.id = ca.business_id where ca.id = p_campaign_id and b.profile_id = public.current_profile_id()) and not public.is_admin() then
     raise exception 'No autorizado.';
   end if;
-  perform public._assert_campaign_transition(v_campaign.status, 'completed');
-  update public.campaigns set status = 'completed', updated_at = now() where id = p_campaign_id;
+  perform public._set_campaign_status(p_campaign_id, 'completed');
   perform public.write_audit_log('business_complete_campaign', 'campaigns', p_campaign_id, '{}'::jsonb);
 end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- RPC postulaciones (actualizadas)
+-- RPC postulaciones
 -- ---------------------------------------------------------------------------
+create or replace function public._set_application_status(p_application_id uuid, p_status public.application_status)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform set_config('kuvo.allow_application_status', 'on', true);
+  update public.applications set status = p_status, updated_at = now() where id = p_application_id;
+  perform set_config('kuvo.allow_application_status', 'off', true);
+end;
+$$;
+
+revoke all on function public._set_application_status(uuid, public.application_status) from public;
+
 create or replace function public.creator_withdraw_application(p_application_id uuid)
 returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-  v_app public.applications%rowtype;
+declare v_app public.applications%rowtype;
 begin
   if not public.is_active_account() then raise exception 'Cuenta bloqueada o sin perfil.'; end if;
   select * into v_app from public.applications where id = p_application_id for update;
   if not found then raise exception 'Postulación no encontrada.'; end if;
-  if not exists(select 1 from public.creator_profiles c where c.id = v_app.creator_id and c.profile_id = public.current_profile_id()) then
+  if not exists(select 1 from public.creator_profiles c join public.profiles p on p.id = c.profile_id where c.id = v_app.creator_id and c.profile_id = public.current_profile_id() and p.active = true) then
     raise exception 'No autorizado.';
   end if;
   if v_app.status <> 'pending' then raise exception 'Solo podés retirar postulaciones pendientes.'; end if;
-  update public.applications set status = 'withdrawn', updated_at = now() where id = p_application_id;
+  perform public._set_application_status(p_application_id, 'withdrawn');
 end;
 $$;
 
@@ -302,20 +385,18 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-  v_app public.applications%rowtype;
-  v_campaign public.campaigns%rowtype;
+declare v_app public.applications%rowtype; v_campaign public.campaigns%rowtype;
 begin
   if not public.is_active_account() and not public.is_admin() then raise exception 'Cuenta bloqueada o sin perfil.'; end if;
   select * into v_app from public.applications where id = p_application_id for update;
   if not found then raise exception 'Postulación no encontrada.'; end if;
   select * into v_campaign from public.campaigns where id = v_app.campaign_id for update;
   if v_campaign.status <> 'open' then raise exception 'La campaña no acepta cambios de postulación.'; end if;
-  if not exists(select 1 from public.business_profiles b where b.id = v_campaign.business_id and b.profile_id = public.current_profile_id()) and not public.is_admin() then
+  if not exists(select 1 from public.business_profiles b join public.profiles p on p.id = b.profile_id where b.id = v_campaign.business_id and b.profile_id = public.current_profile_id() and p.active = true) and not public.is_admin() then
     raise exception 'No autorizado.';
   end if;
   if v_app.status <> 'pending' then raise exception 'Solo podés preseleccionar postulaciones pendientes.'; end if;
-  update public.applications set status = 'shortlisted', updated_at = now() where id = p_application_id;
+  perform public._set_application_status(p_application_id, 'shortlisted');
 end;
 $$;
 
@@ -325,18 +406,16 @@ language plpgsql
 security definer
 set search_path = public
 as $$
-declare
-  v_app public.applications%rowtype;
+declare v_app public.applications%rowtype;
 begin
   if not public.is_active_account() and not public.is_admin() then raise exception 'Cuenta bloqueada o sin perfil.'; end if;
   select * into v_app from public.applications where id = p_application_id for update;
   if not found then raise exception 'Postulación no encontrada.'; end if;
-  if not exists(
-    select 1 from public.campaigns ca join public.business_profiles b on b.id = ca.business_id
-    where ca.id = v_app.campaign_id and b.profile_id = public.current_profile_id()
-  ) and not public.is_admin() then raise exception 'No autorizado.'; end if;
+  if not exists(select 1 from public.campaigns ca join public.business_profiles b on b.id = ca.business_id join public.profiles p on p.id = b.profile_id where ca.id = v_app.campaign_id and b.profile_id = public.current_profile_id() and p.active = true) and not public.is_admin() then
+    raise exception 'No autorizado.';
+  end if;
   if v_app.status not in ('pending', 'shortlisted') then raise exception 'Estado inválido para rechazar.'; end if;
-  update public.applications set status = 'rejected', updated_at = now() where id = p_application_id;
+  perform public._set_application_status(p_application_id, 'rejected');
 end;
 $$;
 
@@ -354,6 +433,7 @@ declare
   v_business_account_id uuid;
   v_creator_account_id uuid;
   v_conversation_id uuid;
+  v_other_accepted uuid;
 begin
   if not public.is_active_account() and not public.is_admin() then
     raise exception 'Cuenta bloqueada o sin perfil.';
@@ -375,6 +455,42 @@ begin
     raise exception 'No autorizado.';
   end if;
 
+  if not exists(select 1 from public.profiles where id = v_business_profile_id and active = true) then
+    raise exception 'El negocio no está activo.';
+  end if;
+
+  select cp.profile_id, p.account_id
+    into v_creator_profile_id, v_creator_account_id
+  from public.creator_profiles cp
+  join public.profiles p on p.id = cp.profile_id
+  where cp.id = v_app.creator_id;
+
+  if not exists(select 1 from public.profiles where id = v_creator_profile_id and active = true) then
+    raise exception 'El creador no está activo.';
+  end if;
+
+  select id into v_conversation_id from public.conversations where campaign_id = v_app.campaign_id limit 1;
+
+  if v_app.status = 'accepted' then
+    if v_conversation_id is null then
+      raise exception 'Postulación aceptada sin conversación asociada.';
+    end if;
+    return v_conversation_id;
+  end if;
+
+  select id into v_other_accepted
+  from public.applications
+  where campaign_id = v_app.campaign_id and status = 'accepted' and id <> p_application_id
+  limit 1;
+
+  if v_other_accepted is not null then
+    raise exception 'Esta campaña ya tiene un creador aceptado.';
+  end if;
+
+  if v_conversation_id is not null then
+    return v_conversation_id;
+  end if;
+
   if v_campaign.status <> 'open' then
     raise exception 'La campaña no está abierta para aceptar postulaciones.';
   end if;
@@ -383,41 +499,17 @@ begin
     raise exception 'Estado inválido para aceptar.';
   end if;
 
-  -- Idempotencia: conversación ya existente
-  select id into v_conversation_id
-  from public.conversations
-  where campaign_id = v_app.campaign_id
-  limit 1;
+  perform public._set_application_status(p_application_id, 'accepted');
 
-  if v_conversation_id is not null then
-    return v_conversation_id;
-  end if;
-
-  if exists(
-    select 1 from public.applications
-    where campaign_id = v_app.campaign_id and status = 'accepted' and id <> p_application_id
-  ) then
-    raise exception 'Esta campaña ya tiene un creador aceptado.';
-  end if;
-
-  update public.applications
-  set status = 'accepted', updated_at = now()
-  where id = p_application_id;
-
+  perform set_config('kuvo.allow_application_status', 'on', true);
   update public.applications
   set status = 'rejected', updated_at = now()
   where campaign_id = v_app.campaign_id
     and id <> p_application_id
     and status in ('pending', 'shortlisted');
+  perform set_config('kuvo.allow_application_status', 'off', true);
 
-  perform public._assert_campaign_transition(v_campaign.status, 'in_progress');
-  update public.campaigns set status = 'in_progress', updated_at = now() where id = v_campaign.id;
-
-  select cp.profile_id, p.account_id
-    into v_creator_profile_id, v_creator_account_id
-  from public.creator_profiles cp
-  join public.profiles p on p.id = cp.profile_id
-  where cp.id = v_app.creator_id;
+  perform public._set_campaign_status(v_campaign.id, 'in_progress');
 
   insert into public.conversations(campaign_id)
   values (v_app.campaign_id)
@@ -442,7 +534,7 @@ begin
 end;
 $$;
 
--- Grants RPC campañas
+-- Grants RPC
 revoke all on function public.business_publish_campaign(uuid) from public;
 revoke all on function public.business_pause_campaign(uuid) from public;
 revoke all on function public.business_reopen_campaign(uuid) from public;
@@ -455,26 +547,8 @@ grant execute on function public.business_cancel_campaign(uuid) to authenticated
 grant execute on function public.business_complete_campaign(uuid) to authenticated;
 
 -- ---------------------------------------------------------------------------
--- Políticas RLS con is_active_account
+-- Políticas RLS con is_active_account (lecturas y escrituras privadas)
 -- ---------------------------------------------------------------------------
-drop policy if exists "owners update profile" on public.profiles;
-create policy "owners update profile"
-  on public.profiles for update
-  using ((account_id = auth.uid() and public.is_active_account()) or public.is_admin())
-  with check ((account_id = auth.uid() and public.is_active_account()) or public.is_admin());
-
-drop policy if exists "owners update creator profile" on public.creator_profiles;
-create policy "owners update creator profile"
-  on public.creator_profiles for update
-  using ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin())
-  with check ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin());
-
-drop policy if exists "owners update business profile" on public.business_profiles;
-create policy "owners update business profile"
-  on public.business_profiles for update
-  using ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin())
-  with check ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin());
-
 drop policy if exists "business creates campaigns" on public.campaigns;
 create policy "business creates campaigns"
   on public.campaigns for insert
@@ -504,18 +578,9 @@ create policy "business updates campaigns"
     )
   );
 
-drop policy if exists "creator applies" on public.applications;
-create policy "creator applies"
-  on public.applications for insert
-  with check (
-    public.is_active_account()
-    and exists(select 1 from public.creator_profiles c where c.id = creator_id and c.profile_id = public.current_profile_id())
-    and exists(select 1 from public.campaigns ca where ca.id = campaign_id and ca.status = 'open')
-  );
-
-drop policy if exists "application parties update" on public.applications;
-create policy "application parties update"
-  on public.applications for update
+drop policy if exists "application parties select" on public.applications;
+create policy "application parties select"
+  on public.applications for select
   using (
     public.is_admin()
     or (
@@ -525,6 +590,72 @@ create policy "application parties update"
         or exists(select 1 from public.campaigns ca join public.business_profiles b on b.id = ca.business_id where ca.id = campaign_id and b.profile_id = public.current_profile_id())
       )
     )
+  );
+
+drop policy if exists "application parties update" on public.applications;
+create policy "application parties update"
+  on public.applications for update
+  using (
+    public.is_admin()
+    or (
+      public.is_active_account()
+      and exists(select 1 from public.creator_profiles c where c.id = creator_id and c.profile_id = public.current_profile_id())
+      and status = 'pending'
+    )
+  )
+  with check (
+    public.is_admin()
+    or (
+      public.is_active_account()
+      and exists(select 1 from public.creator_profiles c where c.id = creator_id and c.profile_id = public.current_profile_id())
+      and status = 'pending'
+    )
+  );
+
+drop policy if exists "own favorites select" on public.favorites;
+create policy "own favorites select"
+  on public.favorites for select
+  using ((account_id = auth.uid() and public.is_active_account()) or public.is_admin());
+
+drop policy if exists "members select conversations" on public.conversations;
+create policy "members select conversations"
+  on public.conversations for select
+  using ((public.is_active_account() and public.is_conversation_member(id)) or public.is_admin());
+
+drop policy if exists "members select membership" on public.conversation_members;
+create policy "members select membership"
+  on public.conversation_members for select
+  using ((public.is_active_account() and public.is_conversation_member(conversation_id)) or public.is_admin());
+
+drop policy if exists "members read messages" on public.messages;
+create policy "members read messages"
+  on public.messages for select
+  using ((public.is_active_account() and public.is_conversation_member(conversation_id)) or public.is_admin());
+
+drop policy if exists "own notifications" on public.notifications;
+create policy "own notifications"
+  on public.notifications for select
+  using ((account_id = auth.uid() and public.is_active_account()) or public.is_admin());
+
+drop policy if exists "own notifications update" on public.notifications;
+create policy "own notifications update"
+  on public.notifications for update
+  using ((account_id = auth.uid() and public.is_active_account()) or public.is_admin());
+
+-- Políticas de escritura (resto de 004, reforzadas)
+drop policy if exists "owners update profile" on public.profiles;
+create policy "owners update profile"
+  on public.profiles for update
+  using ((account_id = auth.uid() and public.is_active_account()) or public.is_admin())
+  with check ((account_id = auth.uid() and public.is_active_account()) or public.is_admin());
+
+drop policy if exists "creator applies" on public.applications;
+create policy "creator applies"
+  on public.applications for insert
+  with check (
+    public.is_active_account()
+    and exists(select 1 from public.creator_profiles c where c.id = creator_id and c.profile_id = public.current_profile_id())
+    and exists(select 1 from public.campaigns ca where ca.id = campaign_id and ca.status = 'open')
   );
 
 drop policy if exists "own favorites insert" on public.favorites;
@@ -578,7 +709,7 @@ create policy "campaign parties review"
     )
   );
 
--- Storage con cuenta activa
+-- Storage
 drop policy if exists "users upload own media" on storage.objects;
 create policy "users upload own media"
   on storage.objects for insert to authenticated
@@ -606,29 +737,18 @@ create policy "users delete own media"
     and ((storage.foldername(name))[1] = public.current_profile_id()::text or public.is_admin())
   );
 
--- ---------------------------------------------------------------------------
--- 1.7 Realtime (documentar en SUPABASE_SETUP)
--- ---------------------------------------------------------------------------
+-- Realtime
 do $$
 begin
-  if not exists (
-    select 1 from pg_publication_tables
-    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'messages'
-  ) then
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'messages') then
     alter publication supabase_realtime add table public.messages;
   end if;
-  if not exists (
-    select 1 from pg_publication_tables
-    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'notifications'
-  ) then
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'notifications') then
     alter publication supabase_realtime add table public.notifications;
   end if;
-  if not exists (
-    select 1 from pg_publication_tables
-    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'conversations'
-  ) then
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'conversations') then
     alter publication supabase_realtime add table public.conversations;
   end if;
 exception when others then
-  raise notice 'Realtime: configurar manualmente messages, notifications y conversations en Supabase Dashboard si falla.';
+  raise notice 'Realtime: configurar manualmente en Supabase Dashboard si falla.';
 end $$;

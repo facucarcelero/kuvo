@@ -1,7 +1,10 @@
 /**
  * Verificación funcional post-migración 003 — proyecto remoto Supabase.
  *
- * Parte A (manual): supabase/tests/verify_schema_003.sql en SQL Editor.
+ * Parte A (manual):
+ *   supabase/tests/verify_schema_003.sql
+ *   supabase/tests/verify_schema_004.sql  (enum in_progress — sesión separada)
+ *   supabase/tests/verify_schema_005.sql
  * Parte B (este script): pruebas RLS ofensivas con tres cuentas existentes.
  *
  * Sin Docker, sin Supabase CLI, sin service_role, sin signUp ni creación de usuarios.
@@ -231,6 +234,10 @@ async function runOffensiveTests(business, creator, third) {
     record('R12', 'Tercero no lee conversaciones ajenas', 'SKIPPED', 'Sin conversación');
     record('R13', 'Negocio accede a conversación propia', 'SKIPPED', 'Sin conversación');
     record('R14', 'Tercero no lee mensajes ajenos', 'SKIPPED', 'Sin conversación');
+    record('R18', 'UPDATE directo campaign.status bloqueado', 'SKIPPED', 'Sin campaña');
+    record('R19', 'UPDATE directo application.status bloqueado', 'SKIPPED', 'Sin postulación');
+    record('R20', 'Negocio no asigna withdrawn', 'SKIPPED', 'Sin postulación');
+    record('R10b', 'Segunda accept devuelve misma conversación', 'SKIPPED', 'Sin postulación');
   } else {
     const { data: campaign, error: campErr } = await business.supabase
       .from('campaigns')
@@ -281,12 +288,17 @@ async function runOffensiveTests(business, creator, third) {
       record('R8', 'Negocio no modifica propuesta/precio', 'SKIPPED', 'Sin postulación');
       record('R9', 'Negocio shortlist vía RPC', 'SKIPPED', 'Sin postulación');
       record('R10', 'Negocio acepta vía RPC business_accept_application', 'SKIPPED', 'Sin postulación');
+      record('R10b', 'Segunda accept devuelve misma conversación', 'SKIPPED', 'Sin postulación');
+      record('R18', 'UPDATE directo campaign.status bloqueado', 'SKIPPED', 'Sin campaña');
+      record('R19', 'UPDATE directo application.status bloqueado', 'SKIPPED', 'Sin postulación');
+      record('R20', 'Negocio no asigna withdrawn', 'SKIPPED', 'Sin postulación');
     } else {
       const { error: selfAcceptErr } = await creator.supabase
         .from('applications')
         .update({ status: 'accepted' })
         .eq('id', application.id);
       record('R7', 'Creador no puede auto-aceptar postulación', selfAcceptErr ? 'PASS' : 'FAIL', selfAcceptErr?.message ?? 'update permitido');
+      record('R19', 'UPDATE directo application.status bloqueado', selfAcceptErr ? 'PASS' : 'FAIL', selfAcceptErr?.message ?? 'update permitido');
 
       const { error: priceErr } = await business.supabase
         .from('applications')
@@ -314,6 +326,32 @@ async function runOffensiveTests(business, creator, third) {
         record('R10', 'Negocio acepta vía RPC business_accept_application', 'FAIL', `[${classifyRpcError(acceptErr)}] ${acceptErr.message}`);
       } else {
         record('R10', 'Negocio acepta vía RPC business_accept_application', convId ? 'PASS' : 'FAIL', convId ? `conversation=${convId}` : 'sin conversation_id');
+
+        if (convId) {
+          const { data: convId2, error: acceptErr2 } = await business.supabase.rpc('business_accept_application', {
+            p_application_id: application.id,
+          });
+          record(
+            'R10b',
+            'Segunda accept devuelve misma conversación',
+            !acceptErr2 && convId2 === convId ? 'PASS' : 'FAIL',
+            acceptErr2?.message ?? `conv1=${convId} conv2=${convId2}`,
+          );
+        } else {
+          record('R10b', 'Segunda accept devuelve misma conversación', 'SKIPPED', 'Sin conversación inicial');
+        }
+
+        const { error: campStatusErr } = await business.supabase
+          .from('campaigns')
+          .update({ status: 'paused' })
+          .eq('id', campaign.id);
+        record('R18', 'UPDATE directo campaign.status bloqueado', campStatusErr ? 'PASS' : 'FAIL', campStatusErr?.message ?? 'update permitido');
+
+        const { error: bizWithdrawErr } = await business.supabase
+          .from('applications')
+          .update({ status: 'withdrawn' })
+          .eq('id', application.id);
+        record('R20', 'Negocio no asigna withdrawn', bizWithdrawErr ? 'PASS' : 'FAIL', bizWithdrawErr?.message ?? 'update permitido');
       }
 
       const { error: convInsertErr } = await third.supabase
@@ -383,6 +421,26 @@ async function runOffensiveTests(business, creator, third) {
     const leaked = thirdNotifs?.some(n => n.account_id !== thirdCtx.user.id);
     record('R16', 'Tercero solo ve sus notificaciones', !leaked ? 'PASS' : 'FAIL', `total=${thirdNotifs?.length ?? 0}`);
   }
+
+  const { error: bootstrapErr } = await creator.supabase.rpc('bootstrap_first_admin', {
+    p_email: creCtx.user.email ?? 'test@example.com',
+  });
+  record(
+    'R22',
+    'Usuario normal no ejecuta bootstrap_first_admin',
+    isRpcMissing(bootstrapErr) || classifyRpcError(bootstrapErr) === 'forbidden' ? 'PASS' : 'FAIL',
+    bootstrapErr?.message ?? 'RPC ejecutada sin error',
+  );
+
+  const { data: thirdReports, error: reportsErr } = await third.supabase
+    .from('reports')
+    .select('id');
+  record(
+    'R23',
+    'Tercero no lee reportes ajenos',
+    !reportsErr && (thirdReports?.length ?? 0) === 0 ? 'PASS' : 'FAIL',
+    reportsErr?.message ?? `filas=${thirdReports?.length ?? 0}`,
+  );
 
   const { error: adminRpcErr } = await creator.supabase.rpc('admin_set_profile_verified', {
     p_profile_id: creCtx.profile.id,

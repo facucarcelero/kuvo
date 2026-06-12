@@ -12,7 +12,17 @@ import {
 import { Logo } from './Logo';
 import { createClient, isDemoMode, isSupabaseConfigured } from '@/lib/supabase/client';
 import { demoApplications, demoCampaigns, demoCreators } from '@/lib/demo';
-import type { Application, Campaign, Role } from '@/lib/types';
+import type { Application, Campaign, Creator, Role } from '@/lib/types';
+import { formatScoreDisplay } from '@/lib/score/kuvo-score';
+import {
+  loadChatMessages,
+  loadConversations,
+  loadFavoriteCreators,
+  loadUnreadNotificationCount,
+  postChatMessage,
+  type ChatLine,
+  type ConversationItem,
+} from '@/features/dashboard/panel-data';
 
 const money = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 });
 type Tab = 'overview' | 'campaigns' | 'applications' | 'messages' | 'favorites' | 'profile';
@@ -42,28 +52,38 @@ export function Dashboard() {
   const router = useRouter();
   const [profile, setProfile] = useState<SessionProfile | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
-  const [campaigns, setCampaigns] = useState<Campaign[]>(demoCampaigns.slice(0,3));
-  const [applications, setApplications] = useState<Application[]>(demoApplications);
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [applications, setApplications] = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
   const [sidebar, setSidebar] = useState(false);
   const [campaignModal, setCampaignModal] = useState(false);
   const [applyCampaign, setApplyCampaign] = useState<Campaign | null>(null);
   const [toast, setToast] = useState('');
-  const [chat, setChat] = useState(demoMessages[0]);
-  const [chatMessages, setChatMessages] = useState([
-    { mine:false, text:'Hola, vi la campaña y tengo una idea para mostrar la experiencia completa.', time:'12:15' },
-    { mine:true, text:'¡Hola! Contame cómo la plantearías y qué entregables incluirías.', time:'12:19' },
-    { mine:false, text:'Haría un reel de experiencia, tres historias y un cierre directo a reservas.', time:'12:31' },
-    { mine:false, text:'Perfecto, puedo grabar el viernes por la noche.', time:'12:42' },
-  ]);
+  const [conversations, setConversations] = useState<ConversationItem[]>([]);
+  const [activeConversation, setActiveConversation] = useState<ConversationItem | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatLine[]>([]);
+  const [favoriteCreators, setFavoriteCreators] = useState<Creator[]>([]);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const demo = isDemoMode();
 
   useEffect(() => { void loadSession(); }, []);
 
   async function loadSession() {
-    if (isDemoMode()) {
-      let demo: any = null;
-      try { demo = JSON.parse(localStorage.getItem('kuvo_demo_session') || 'null'); } catch {}
-      setProfile({ id:'demo-profile', name:demo?.name || 'Cuenta Demo', email:demo?.email || 'demo@kuvo.app', role:demo?.role || 'business', city:'San Juan', bio:'Perfil de demostración de KUVO.', username:'cuentademo', businessName:'Estudio Norte', businessId:'demo-business', creatorId:'cr-5', category:'Lifestyle' });
+    if (demo) {
+      let demoSession: any = null;
+      try { demoSession = JSON.parse(localStorage.getItem('kuvo_demo_session') || 'null'); } catch {}
+      setProfile({ id:'demo-profile', name:demoSession?.name || 'Cuenta Demo', email:demoSession?.email || 'demo@kuvo.app', role:demoSession?.role || 'business', city:'San Juan', bio:'Perfil de demostración de KUVO.', username:'cuentademo', businessName:'Estudio Norte', businessId:'demo-business', creatorId:'cr-5', category:'Lifestyle' });
+      setCampaigns(demoCampaigns.slice(0, 3));
+      setApplications(demoApplications);
+      setConversations(demoMessages.map(m => ({ id: m.id, title: m.name, initials: m.initials, preview: m.text, time: m.time, unread: m.unread })));
+      setActiveConversation({ id: demoMessages[0].id, title: demoMessages[0].name, initials: demoMessages[0].initials, preview: demoMessages[0].text, time: demoMessages[0].time, unread: 0 });
+      setChatMessages([
+        { id: '1', mine: false, text: 'Hola, vi la campaña y tengo una idea.', time: '12:15' },
+        { id: '2', mine: true, text: '¡Hola! Contame tu propuesta.', time: '12:19' },
+      ]);
+      setFavoriteCreators(demoCreators.slice(0, 4));
+      setUnreadNotifications(0);
       setLoading(false);
       return;
     }
@@ -91,7 +111,33 @@ export function Dashboard() {
       const { data: open } = await supabase.from('campaigns').select('*,business_profiles(business_name)').eq('status','open').limit(12);
       if (open) setCampaigns(open.map((c:any)=>({ id:c.id,businessId:c.business_id,businessName:c.business_profiles?.business_name || 'Negocio',title:c.title,description:c.description,category:c.category,city:c.city,budgetMin:c.budget_min,budgetMax:c.budget_max,deliverables:c.deliverables||[],deadline:c.deadline,status:c.status,gradient:['#1d4ed8','#06b6d4'] })));
     }
+
+    const [{ items: convItems }, { creators: favs }, unread] = await Promise.all([
+      loadConversations(supabase, p.id),
+      loadFavoriteCreators(supabase, user.id),
+      loadUnreadNotificationCount(supabase, user.id),
+    ]);
+    setConversations(convItems);
+    setFavoriteCreators(favs);
+    setUnreadNotifications(unread);
+    if (convItems[0]) {
+      setActiveConversation(convItems[0]);
+      const { lines } = await loadChatMessages(supabase, convItems[0].id, p.id);
+      setChatMessages(lines);
+    }
     setLoading(false);
+  }
+
+  async function openConversation(conv: ConversationItem) {
+    setActiveConversation(conv);
+    if (demo || !profile) return;
+    const supabase = createClient();
+    if (!supabase) return;
+    setMessagesLoading(true);
+    const { lines, error } = await loadChatMessages(supabase, conv.id, profile.id);
+    setMessagesLoading(false);
+    if (error) { notify(error); return; }
+    setChatMessages(lines);
   }
 
   const isBusiness = profile?.role === 'business' || profile?.role === 'admin';
@@ -120,7 +166,7 @@ export function Dashboard() {
     event.preventDefault();
     const f = new FormData(event.currentTarget);
     const next:Campaign = {
-      id:`campaign-${Date.now()}`, businessId:'demo-business', businessName:profile?.businessName || profile?.name || 'Mi negocio',
+      id:`campaign-${crypto.randomUUID()}`, businessId:'demo-business', businessName:profile?.businessName || profile?.name || 'Mi negocio',
       title:String(f.get('title')), description:String(f.get('description')), category:String(f.get('category')), city:String(f.get('city')),
       budgetMin:Number(f.get('budgetMin')), budgetMax:Number(f.get('budgetMax')), deliverables:String(f.get('deliverables')).split(',').map(x=>x.trim()).filter(Boolean),
       deadline:String(f.get('deadline')), status:'open', applicants:0, gradient:['#7c3aed','#ec4899']
@@ -141,7 +187,7 @@ export function Dashboard() {
     if (!applyCampaign || !profile?.creatorId) return;
     const f = new FormData(event.currentTarget);
     const next:Application = {
-      id:`application-${Date.now()}`,
+      id:`application-${crypto.randomUUID()}`,
       campaignId:applyCampaign.id,
       campaignTitle:applyCampaign.title,
       creatorId:profile.creatorId,
@@ -194,10 +240,27 @@ export function Dashboard() {
     setProfile(p=>p?{...p,...changes}:p); notify('Perfil actualizado');
   }
 
-  function sendMessage(event:FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const f=new FormData(event.currentTarget); const text=String(f.get('message')).trim(); if(!text)return;
-    setChatMessages(v=>[...v,{mine:true,text,time:new Date().toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'})}]); event.currentTarget.reset();
+  async function sendMessage(event:FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const f = new FormData(event.currentTarget);
+    const text = String(f.get('message')).trim();
+    if (!text || !activeConversation || !profile) return;
+
+    if (demo) {
+      setChatMessages(v => [...v, { id: String(Date.now()), mine: true, text, time: new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) }]);
+      event.currentTarget.reset();
+      return;
+    }
+
+    const supabase = createClient();
+    if (!supabase) return;
+    const { data, error } = await postChatMessage(supabase, activeConversation.id, profile.id, text);
+    if (error) { notify(error.message); return; }
+    setChatMessages(v => [...v, { id: data.id, mine: true, text: data.body, time: new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) }]);
+    event.currentTarget.reset();
   }
+
+  const profileScoreLabel = formatScoreDisplay(null);
 
   if (loading) return <div className="fullLoader"><Logo/><div className="loaderRing"/><p>Cargando tu espacio...</p></div>;
   if (!profile) return <div className="fullLoader"><p>No pudimos cargar tu perfil.</p><Link className="primaryBtn" href="/login">Volver a ingresar</Link></div>;
@@ -209,7 +272,7 @@ export function Dashboard() {
   return <div className="dashboardApp">
     <aside className={sidebar?'dashSidebar open':'dashSidebar'}>
       <div className="dashLogo"><Logo/><button onClick={()=>setSidebar(false)}><X/></button></div>
-      <nav>{menu.map(([key,label,Icon])=><button key={key} className={tab===key?'active':''} onClick={()=>nav(key)}><Icon size={19}/><span>{label}</span>{key==='messages'&&<b>2</b>}</button>)}</nav>
+      <nav>{menu.map(([key,label,Icon])=><button key={key} className={tab===key?'active':''} onClick={()=>nav(key)}><Icon size={19}/><span>{label}</span>{key==='messages'&&unreadNotifications>0&&<b>{unreadNotifications}</b>}</button>)}</nav>
       <div className="sidebarPromo"><Sparkles/><strong>Mejorá tu perfil</strong><p>Completá tus datos para recibir mejores oportunidades.</p><button onClick={()=>nav('profile')}>Completar ahora</button></div>
       <button className="logoutBtn" onClick={logout}><LogOut size={18}/> Cerrar sesión</button>
     </aside>
@@ -217,7 +280,7 @@ export function Dashboard() {
       <header className="dashHeader">
         <button className="dashMenu" onClick={()=>setSidebar(true)}><Menu/></button>
         <div><h1>{menu.find(x=>x[0]===tab)?.[1]}</h1><p>{isBusiness?'Gestioná tu presencia y tus colaboraciones.':'Encontrá oportunidades y hacé crecer tu perfil.'}</p></div>
-        <div className="dashHeaderActions"><Link href="/" className="iconButton" title="Volver al sitio"><ArrowLeft size={18}/></Link><button className="iconButton"><Bell size={18}/><i/></button><button className="accountPill" onClick={()=>nav('profile')}><span>{profile.name.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase()}</span><p><strong>{profile.name}</strong><small>{isBusiness?'Negocio':'Creador'}</small></p></button></div>
+        <div className="dashHeaderActions"><Link href="/" className="iconButton" title="Volver al sitio"><ArrowLeft size={18}/></Link><button className="iconButton" aria-label="Notificaciones">{unreadNotifications > 0 && <i aria-hidden />}<Bell size={18}/></button><button className="accountPill" onClick={()=>nav('profile')}><span>{profile.name.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase()}</span><p><strong>{profile.name}</strong><small>{isBusiness?'Negocio':'Creador'}</small></p></button></div>
       </header>
 
       <div className="dashContent">
@@ -231,11 +294,11 @@ export function Dashboard() {
 
         {tab==='applications'&&<section className="dashPanel applicationPanel"><div className="panelTitle"><div><h3>{isBusiness?'Postulaciones recibidas':'Mis postulaciones'}</h3><p>{applications.length} movimientos registrados</p></div></div><div className="applicationTable"><div className="tableHead"><span>{isBusiness?'Creador':'Campaña'}</span><span>Propuesta</span><span>Estado</span><span>Fecha</span><span>Acciones</span></div>{applications.map(a=><div className="tableRow" key={a.id}><div className="applicationPerson"><span>{(isBusiness?a.creatorName:a.campaignTitle).split(' ').map(x=>x[0]).slice(0,2).join('')}</span><p><strong>{isBusiness?a.creatorName:a.campaignTitle}</strong><small>{isBusiness?a.campaignTitle:a.message}</small></p></div><strong>{money.format(a.proposedPrice)}</strong><i className={`status ${a.status}`}>{a.status==='pending'?'Pendiente':a.status==='shortlisted'?'Preseleccionada':a.status==='accepted'?'Aceptada':'Rechazada'}</i><span>{new Date(a.createdAt).toLocaleDateString('es-AR')}</span><div className="rowActions">{isBusiness&&a.status!=='accepted'&&<><button title="Preseleccionar" onClick={()=>updateApplication(a.id,'shortlisted')}><BadgeCheck/></button><button title="Aceptar" onClick={()=>updateApplication(a.id,'accepted')}><Check/></button><button title="Rechazar" onClick={()=>updateApplication(a.id,'rejected')}><X/></button></>}<button title="Mensaje" onClick={()=>nav('messages')}><MessageCircle/></button></div></div>)}</div></section>}
 
-        {tab==='messages'&&<div className="messagesLayout"><aside className="conversationList"><div className="conversationSearch"><Search/><input placeholder="Buscar conversación"/></div>{demoMessages.map(m=><button key={m.id} className={chat.id===m.id?'active':''} onClick={()=>setChat(m)}><span>{m.initials}</span><p><strong>{m.name}</strong><small>{m.text}</small></p><time>{m.time}</time>{m.unread>0&&<b>{m.unread}</b>}</button>)}</aside><section className="chatPanel"><header><span>{chat.initials}</span><p><strong>{chat.name}</strong><small><i/> En línea</small></p><button><FileText/></button></header><div className="chatBody">{chatMessages.map((m,i)=><div key={i} className={m.mine?'mine':''}><p>{m.text}</p><time>{m.time}</time></div>)}</div><form onSubmit={sendMessage}><input name="message" placeholder="Escribí un mensaje..." autoComplete="off"/><button><Send/></button></form></section></div>}
+        {tab==='messages'&&<div className="messagesLayout"><aside className="conversationList"><div className="conversationSearch"><Search/><input placeholder="Buscar conversación"/></div>{conversations.length===0&&<p className="emptyInline">Todavía no tenés conversaciones.</p>}{conversations.map(m=><button key={m.id} type="button" className={activeConversation?.id===m.id?'active':''} onClick={()=>void openConversation(m)}><span>{m.initials}</span><p><strong>{m.title}</strong><small>{m.preview}</small></p><time>{m.time}</time>{m.unread>0&&<b>{m.unread}</b>}</button>)}</aside><section className="chatPanel">{activeConversation?(<><header><span>{activeConversation.initials}</span><p><strong>{activeConversation.title}</strong><small>Campaña vinculada</small></p><button type="button"><FileText/></button></header><div className="chatBody">{messagesLoading&&<p className="loadingLine"/>}{chatMessages.map(m=><div key={m.id} className={m.mine?'mine':''}><p>{m.text}</p><time>{m.time}</time></div>)}</div><form onSubmit={sendMessage}><input name="message" placeholder="Escribí un mensaje..." autoComplete="off"/><button type="submit"><Send/></button></form></>):(<div className="emptyState compact"><MessageCircle/><p>Elegí una conversación de la lista.</p></div>)}</section></div>}
 
-        {tab==='favorites'&&<><div className="sectionHeading compact"><h2>Creadores guardados</h2><p>Tu selección personal para futuras campañas.</p></div><div className="creatorGrid inDashboard">{demoCreators.slice(0,4).map(c=><article className="creatorCard" key={c.id}><div className="creatorCover" style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}><span>{c.category}</span><button><Heart fill="currentColor"/></button></div><div className="creatorContent"><div className="creatorAvatar" style={{background:`linear-gradient(135deg,${c.gradient[1]},${c.gradient[0]})`}}>{c.initials}</div><div className="creatorName"><h3>{c.name}</h3>{c.verified&&<BadgeCheck/>}</div><p className="creatorHandle">{c.username} · {c.city}</p><div className="cardFooter"><p><span>Desde</span><strong>{money.format(c.startingPrice)}</strong></p><Link href="/" className="smallBtn">Ver perfil</Link></div></div></article>)}</div></>}
+        {tab==='favorites'&&<><div className="sectionHeading compact"><h2>Creadores guardados</h2><p>Tu selección personal para futuras campañas.</p></div>{favoriteCreators.length===0?(<div className="emptyState"><Heart/><h3>Sin favoritos todavía</h3><p>Guardá creadores desde el marketplace para verlos acá.</p><Link href="/explorar" className="primaryBtn">Explorar creadores</Link></div>):(<div className="creatorGrid inDashboard">{favoriteCreators.map(c=><article className="creatorCard" key={c.id}><div className="creatorCover" style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}><span>{c.category}</span><button type="button" aria-label="Quitar favorito"><Heart fill="currentColor"/></button></div><div className="creatorContent"><div className="creatorAvatar" style={{background:`linear-gradient(135deg,${c.gradient[1]},${c.gradient[0]})`}}>{c.initials}</div><div className="creatorName"><h3>{c.name}</h3>{c.verified&&<BadgeCheck/>}</div><p className="creatorHandle">{c.username} · {c.city}</p><div className="cardFooter"><p><span>Desde</span><strong>{money.format(c.startingPrice)}</strong></p><Link href="/explorar" className="smallBtn">Ver en marketplace</Link></div></div></article>)}</div>)}</>}
 
-        {tab==='profile'&&<div className="profileSettings"><section className="dashPanel"><div className="profileBanner"><div>{profile.name.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase()}</div><button className="ghostBtn">Cambiar foto</button></div><form onSubmit={saveProfile} className="settingsForm"><div className="formGrid"><label>Nombre completo<input name="name" defaultValue={profile.name} required/></label><label>Nombre de usuario<input name="username" defaultValue={profile.username}/></label>{isBusiness&&<label>Nombre del negocio<input name="businessName" defaultValue={profile.businessName}/></label>}<label>Ciudad<input name="city" defaultValue={profile.city}/></label><label className="span2">Descripción<textarea name="bio" defaultValue={profile.bio} rows={5}/></label></div><div className="settingsActions"><button type="submit" className="primaryBtn">Guardar cambios</button></div></form></section><aside className="dashPanel profileScore"><Activity/><strong>{isBusiness?'86%':'91'}</strong><h3>{isBusiness?'Perfil completado':'KUVO Score'}</h3><p>Completá redes, portfolio y datos de contacto para mejorar tu visibilidad.</p><div><i style={{width:isBusiness?'86%':'91%'}}/></div><ul><li><Check/> Información principal</li><li><Check/> Correo verificado</li><li><Clock3/> Vincular redes sociales</li></ul></aside></div>}
+        {tab==='profile'&&<div className="profileSettings"><section className="dashPanel"><div className="profileBanner"><div>{profile.name.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase()}</div><button className="ghostBtn">Cambiar foto</button></div><form onSubmit={saveProfile} className="settingsForm"><div className="formGrid"><label>Nombre completo<input name="name" defaultValue={profile.name} required/></label><label>Nombre de usuario<input name="username" defaultValue={profile.username}/></label>{isBusiness&&<label>Nombre del negocio<input name="businessName" defaultValue={profile.businessName}/></label>}<label>Ciudad<input name="city" defaultValue={profile.city}/></label><label className="span2">Descripción<textarea name="bio" defaultValue={profile.bio} rows={5}/></label></div><div className="settingsActions"><button type="submit" className="primaryBtn">Guardar cambios</button></div></form></section><aside className="dashPanel profileScore"><Activity/><strong>{profileScoreLabel}</strong><h3>{isBusiness?'Perfil completado':'KUVO Score'}</h3><p>Completá redes, portfolio y datos de contacto para mejorar tu visibilidad.</p><ul><li><Check/> Información principal</li><li><Check/> Correo verificado</li><li><Clock3/> Vincular redes sociales</li></ul></aside></div>}
       </div>
     </div>
 
