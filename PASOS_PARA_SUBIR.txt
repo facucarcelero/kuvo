@@ -1,0 +1,30 @@
+KUVO — PASOS RÁPIDOS PARA PUBLICAR
+==================================
+
+OPCIÓN RECOMENDADA: VERCEL + SUPABASE
+
+1. Descomprimí KUVO-CODIGO-FUENTE.zip.
+2. Subí la carpeta a un repositorio de GitHub.
+3. Creá un proyecto gratuito en Supabase.
+4. En Supabase > SQL Editor, ejecutá:
+   supabase/KUVO_DATABASE_COMPLETE.sql
+5. Copiá .env.example como .env.local y completá la URL y clave anon de Supabase.
+6. Importá el repositorio en Vercel.
+7. Cargá en Vercel las mismas variables de entorno.
+8. En Supabase > Authentication > URL Configuration, agregá:
+   https://TU-DOMINIO.com/auth/callback
+9. Desplegá.
+
+MODO DEMOSTRACIÓN
+
+Sin Supabase, la aplicación abre y permite navegar, registrarse y probar paneles con datos locales. Para cuentas y datos reales, es obligatorio completar los pasos de Supabase.
+
+ADMINISTRADOR
+
+Registrá una cuenta y ejecutá en Supabase:
+
+update public.profiles
+set role = 'admin'
+where account_id = (select id from auth.users where email = 'TU-CORREO');
+
+Más detalles: README.md y SUPABASE_SETUP.md

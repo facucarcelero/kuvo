@@ -1,0 +1,12 @@
+node_modules
+.next
+.env
+.env.local
+.vercel
+.DS_Store
+npm-debug.log*
+
+# Archivos de distribución (ya extraídos en la raíz)
+*.zip
+kuvo-source/
+kuvo-server/

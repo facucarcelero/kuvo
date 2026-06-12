@@ -1,0 +1,17 @@
+{
+  "name": "KUVO — Negocios + Creadores",
+  "short_name": "KUVO",
+  "description": "Marketplace profesional para campañas con creadores.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090f",
+  "theme_color": "#8b5cf6",
+  "orientation": "any",
+  "lang": "es-AR",
+  "categories": ["business", "social", "productivity"],
+  "icons": [
+    {"src":"/icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},
+    {"src":"/icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},
+    {"src":"/icons/maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"}
+  ]
+}
