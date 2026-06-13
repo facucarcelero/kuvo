@@ -18,11 +18,22 @@ import {
   loadChatMessages,
   loadConversations,
   loadFavoriteCreators,
+  loadNotificationItems,
   loadUnreadNotificationCount,
   postChatMessage,
+  totalUnreadMessages,
   type ChatLine,
   type ConversationItem,
+  type NotificationItem,
 } from '@/features/dashboard/panel-data';
+import { markAllNotificationsRead, markNotificationRead } from '@/features/notifications/api';
+import {
+  applicationStatusLabel,
+  businessCanAccept,
+  businessCanReject,
+  businessCanShortlist,
+  creatorCanWithdraw,
+} from '@/lib/labels/application-status';
 
 const money = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 });
 type Tab = 'overview' | 'campaigns' | 'applications' | 'messages' | 'favorites' | 'profile';
@@ -64,6 +75,10 @@ export function Dashboard() {
   const [chatMessages, setChatMessages] = useState<ChatLine[]>([]);
   const [favoriteCreators, setFavoriteCreators] = useState<Creator[]>([]);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [unreadMessages, setUnreadMessages] = useState(0);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notificationItems, setNotificationItems] = useState<NotificationItem[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const demo = isDemoMode();
 
@@ -76,8 +91,8 @@ export function Dashboard() {
       setProfile({ id:'demo-profile', name:demoSession?.name || 'Cuenta Demo', email:demoSession?.email || 'demo@kuvo.app', role:demoSession?.role || 'business', city:'San Juan', bio:'Perfil de demostración de KUVO.', username:'cuentademo', businessName:'Estudio Norte', businessId:'demo-business', creatorId:'cr-5', category:'Lifestyle' });
       setCampaigns(demoCampaigns.slice(0, 3));
       setApplications(demoApplications);
-      setConversations(demoMessages.map(m => ({ id: m.id, title: m.name, initials: m.initials, preview: m.text, time: m.time, unread: m.unread })));
-      setActiveConversation({ id: demoMessages[0].id, title: demoMessages[0].name, initials: demoMessages[0].initials, preview: demoMessages[0].text, time: demoMessages[0].time, unread: 0 });
+      setConversations(demoMessages.map(m => ({ id: m.id, title: m.name, initials: m.initials, preview: m.text, time: m.time, unread: m.unread, lastMessageAt: null })));
+      setActiveConversation({ id: demoMessages[0].id, title: demoMessages[0].name, initials: demoMessages[0].initials, preview: demoMessages[0].text, time: demoMessages[0].time, unread: 0, lastMessageAt: null });
       setChatMessages([
         { id: '1', mine: false, text: 'Hola, vi la campaña y tengo una idea.', time: '12:15' },
         { id: '2', mine: true, text: '¡Hola! Contame tu propuesta.', time: '12:19' },
@@ -118,6 +133,7 @@ export function Dashboard() {
       loadUnreadNotificationCount(supabase, user.id),
     ]);
     setConversations(convItems);
+    setUnreadMessages(totalUnreadMessages(convItems));
     setFavoriteCreators(favs);
     setUnreadNotifications(unread);
     if (convItems[0]) {
@@ -126,6 +142,123 @@ export function Dashboard() {
       setChatMessages(lines);
     }
     setLoading(false);
+  }
+
+  useEffect(() => {
+    if (demo || !profile?.id || !profile.accountId || !isSupabaseConfigured()) return;
+    const supabase = createClient();
+    if (!supabase) return;
+
+    const channel = supabase
+      .channel(`panel-live-${profile.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages' },
+        (payload) => {
+          const msg = payload.new as {
+            id: string;
+            conversation_id: string;
+            sender_profile_id: string;
+            body: string;
+            created_at: string;
+          };
+          const mine = msg.sender_profile_id === profile.id;
+          const isActive = activeConversation?.id === msg.conversation_id;
+
+          if (isActive) {
+            setChatMessages(v => {
+              if (v.some(x => x.id === msg.id)) return v;
+              return [...v, {
+                id: msg.id,
+                mine,
+                text: msg.body,
+                time: new Date(msg.created_at).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }),
+              }];
+            });
+          }
+
+          setConversations(prev => {
+            const next = prev.map(c => {
+              if (c.id !== msg.conversation_id) return c;
+              return {
+                ...c,
+                preview: msg.body,
+                time: new Date(msg.created_at).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }),
+                lastMessageAt: msg.created_at,
+                unread: isActive || mine ? c.unread : c.unread + 1,
+              };
+            });
+            setUnreadMessages(totalUnreadMessages(next));
+            return [...next].sort((a, b) => {
+              const aTime = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+              const bTime = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
+              return bTime - aTime;
+            });
+          });
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `account_id=eq.${profile.accountId}` },
+        (payload) => {
+          const row = payload.new as NotificationItem & { action_url?: string | null; read_at?: string | null; created_at?: string };
+          setNotificationItems(v => [{
+            id: row.id,
+            title: row.title,
+            body: row.body,
+            actionUrl: row.action_url ?? row.actionUrl ?? null,
+            readAt: row.read_at ?? row.readAt ?? null,
+            createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
+          }, ...v]);
+          setUnreadNotifications(n => n + 1);
+        },
+      )
+      .subscribe();
+
+    return () => { void supabase.removeChannel(channel); };
+  }, [demo, profile?.id, profile?.accountId, activeConversation?.id]);
+
+  async function openNotificationsPanel() {
+    setNotificationsOpen(v => !v);
+    if (demo || !profile?.accountId) return;
+    const supabase = createClient();
+    if (!supabase) return;
+    setNotificationsLoading(true);
+    const { items, error } = await loadNotificationItems(supabase, profile.accountId);
+    setNotificationsLoading(false);
+    if (error) { notify(error); return; }
+    setNotificationItems(items);
+  }
+
+  async function readNotification(id: string) {
+    if (demo) {
+      setNotificationItems(v => v.map(n => n.id === id ? { ...n, readAt: new Date().toISOString() } : n));
+      setUnreadNotifications(n => Math.max(0, n - 1));
+      return;
+    }
+    const supabase = createClient();
+    if (!supabase) return;
+    const target = notificationItems.find(n => n.id === id);
+    if (target?.readAt) return;
+    const { error } = await markNotificationRead(supabase, id);
+    if (error) { notify(error.message); return; }
+    setNotificationItems(v => v.map(n => n.id === id ? { ...n, readAt: new Date().toISOString() } : n));
+    setUnreadNotifications(n => Math.max(0, n - 1));
+  }
+
+  async function readAllNotifications() {
+    if (demo) {
+      setNotificationItems(v => v.map(n => ({ ...n, readAt: n.readAt ?? new Date().toISOString() })));
+      setUnreadNotifications(0);
+      return;
+    }
+    if (!profile?.accountId) return;
+    const supabase = createClient();
+    if (!supabase) return;
+    const { error } = await markAllNotificationsRead(supabase, profile.accountId);
+    if (error) { notify(error.message); return; }
+    setNotificationItems(v => v.map(n => ({ ...n, readAt: n.readAt ?? new Date().toISOString() })));
+    setUnreadNotifications(0);
   }
 
   async function openConversation(conv: ConversationItem) {
@@ -138,6 +271,11 @@ export function Dashboard() {
     setMessagesLoading(false);
     if (error) { notify(error); return; }
     setChatMessages(lines);
+    setConversations(prev => {
+      const next = prev.map(c => c.id === conv.id ? { ...c, unread: 0 } : c);
+      setUnreadMessages(totalUnreadMessages(next));
+      return next;
+    });
   }
 
   const isBusiness = profile?.role === 'business' || profile?.role === 'admin';
@@ -165,20 +303,41 @@ export function Dashboard() {
   async function createCampaign(event:FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const f = new FormData(event.currentTarget);
-    const next:Campaign = {
-      id:`campaign-${crypto.randomUUID()}`, businessId:'demo-business', businessName:profile?.businessName || profile?.name || 'Mi negocio',
+    const payload = {
       title:String(f.get('title')), description:String(f.get('description')), category:String(f.get('category')), city:String(f.get('city')),
       budgetMin:Number(f.get('budgetMin')), budgetMax:Number(f.get('budgetMax')), deliverables:String(f.get('deliverables')).split(',').map(x=>x.trim()).filter(Boolean),
-      deadline:String(f.get('deadline')), status:'open', applicants:0, gradient:['#7c3aed','#ec4899']
+      deadline:String(f.get('deadline')),
     };
-    if (isSupabaseConfigured()) {
-      const supabase = createClient();
-      const { data: business } = await supabase!.from('business_profiles').select('id').eq('profile_id', profile!.id).single();
-      if (!business) { notify('Primero completá el perfil del negocio.'); return; }
-      const { data, error } = await supabase!.from('campaigns').insert({ business_id:business.id,title:next.title,description:next.description,category:next.category,city:next.city,budget_min:next.budgetMin,budget_max:next.budgetMax,deliverables:next.deliverables,deadline:next.deadline,status:'open' }).select().single();
-      if (error) { notify(error.message); return; }
-      next.id = data.id;
+
+    if (demo) {
+      const next:Campaign = {
+        id:`campaign-${crypto.randomUUID()}`, businessId:'demo-business', businessName:profile?.businessName || profile?.name || 'Mi negocio',
+        ...payload, status:'open', applicants:0, gradient:['#7c3aed','#ec4899'],
+      };
+      setCampaigns(v=>[next,...v]); setCampaignModal(false); event.currentTarget.reset(); notify('Campaña publicada correctamente');
+      return;
     }
+
+    if (!isSupabaseConfigured() || !profile) {
+      notify('No pudimos conectar con la base de datos. Intentá de nuevo.');
+      return;
+    }
+
+    const supabase = createClient();
+    if (!supabase) { notify('No pudimos conectar con la base de datos. Intentá de nuevo.'); return; }
+    const { data: business } = await supabase.from('business_profiles').select('id').eq('profile_id', profile.id).single();
+    if (!business) { notify('Primero completá el perfil del negocio.'); return; }
+    const { data, error } = await supabase.from('campaigns').insert({
+      business_id:business.id, title:payload.title, description:payload.description, category:payload.category, city:payload.city,
+      budget_min:payload.budgetMin, budget_max:payload.budgetMax, deliverables:payload.deliverables, deadline:payload.deadline, status:'draft',
+    }).select().single();
+    if (error || !data) { notify(error?.message ?? 'No pudimos crear la campaña.'); return; }
+    const { error: publishErr } = await supabase.rpc('business_publish_campaign', { p_campaign_id: data.id });
+    if (publishErr) { notify(publishErr.message); return; }
+    const next:Campaign = {
+      id:data.id, businessId:business.id, businessName:profile.businessName || profile.name,
+      ...payload, status:'open', applicants:0, gradient:['#7c3aed','#ec4899'],
+    };
     setCampaigns(v=>[next,...v]); setCampaignModal(false); event.currentTarget.reset(); notify('Campaña publicada correctamente');
   }
 
@@ -186,27 +345,53 @@ export function Dashboard() {
     event.preventDefault();
     if (!applyCampaign || !profile?.creatorId) return;
     const f = new FormData(event.currentTarget);
+    const message = String(f.get('message'));
+    const proposedPrice = Number(f.get('proposedPrice'));
+
+    if (demo) {
+      const next:Application = {
+        id:`application-${crypto.randomUUID()}`,
+        campaignId:applyCampaign.id,
+        campaignTitle:applyCampaign.title,
+        creatorId:profile.creatorId,
+        creatorName:profile.name,
+        message,
+        proposedPrice,
+        status:'pending',
+        createdAt:new Date().toISOString(),
+      };
+      setApplications(v=>[next,...v]);
+      setApplyCampaign(null);
+      setTab('applications');
+      notify('Postulación enviada correctamente');
+      return;
+    }
+
+    if (!isSupabaseConfigured()) {
+      notify('No pudimos conectar con la base de datos. Intentá de nuevo.');
+      return;
+    }
+
+    const supabase = createClient();
+    if (!supabase) { notify('No pudimos conectar con la base de datos. Intentá de nuevo.'); return; }
+    const { data, error } = await supabase.from('applications').insert({
+      campaign_id:applyCampaign.id,
+      creator_id:profile.creatorId,
+      message,
+      proposed_price:proposedPrice,
+    }).select().single();
+    if (error || !data) { notify(error?.code === '23505' ? 'Ya te postulaste a esta campaña.' : error?.message ?? 'No pudimos enviar la postulación.'); return; }
     const next:Application = {
-      id:`application-${crypto.randomUUID()}`,
+      id:data.id,
       campaignId:applyCampaign.id,
       campaignTitle:applyCampaign.title,
       creatorId:profile.creatorId,
       creatorName:profile.name,
-      message:String(f.get('message')),
-      proposedPrice:Number(f.get('proposedPrice')),
+      message,
+      proposedPrice,
       status:'pending',
-      createdAt:new Date().toISOString(),
+      createdAt:data.created_at ?? new Date().toISOString(),
     };
-    if (isSupabaseConfigured()) {
-      const { data, error } = await createClient()!.from('applications').insert({
-        campaign_id:next.campaignId,
-        creator_id:next.creatorId,
-        message:next.message,
-        proposed_price:next.proposedPrice,
-      }).select().single();
-      if (error) { notify(error.code === '23505' ? 'Ya te postulaste a esta campaña.' : error.message); return; }
-      next.id = data.id;
-    }
     setApplications(v=>[next,...v]);
     setApplyCampaign(null);
     setTab('applications');
@@ -214,28 +399,65 @@ export function Dashboard() {
   }
 
   async function updateApplication(id:string, action:'accepted'|'rejected'|'shortlisted') {
-    if (isSupabaseConfigured()) {
-      const supabase = createClient();
-      const rpcMap = {
-        accepted: 'business_accept_application',
-        rejected: 'business_reject_application',
-        shortlisted: 'business_shortlist_application',
-      } as const;
-      const { error } = await supabase!.rpc(rpcMap[action], { p_application_id: id });
-      if (error) { notify(error.message); return; }
+    if (demo) {
+      setApplications(v=>v.map(a=>a.id===id?{...a,status:action}:a));
+      notify(`Postulación ${applicationStatusLabel(action)}`);
+      return;
     }
+    if (!isSupabaseConfigured()) { notify('No pudimos conectar con la base de datos.'); return; }
+    const supabase = createClient();
+    if (!supabase) { notify('No pudimos conectar con la base de datos.'); return; }
+    const rpcMap = {
+      accepted: 'business_accept_application',
+      rejected: 'business_reject_application',
+      shortlisted: 'business_shortlist_application',
+    } as const;
+    const { error } = await supabase.rpc(rpcMap[action], { p_application_id: id });
+    if (error) { notify(error.message); return; }
     setApplications(v=>v.map(a=>a.id===id?{...a,status:action}:a));
-    notify(`Postulación ${action==='accepted'?'aceptada':action==='rejected'?'rechazada':'preseleccionada'}`);
+    notify(`Postulación ${applicationStatusLabel(action)}`);
+  }
+
+  async function withdrawApplication(id: string) {
+    if (demo) {
+      setApplications(v => v.map(a => a.id === id ? { ...a, status: 'withdrawn' } : a));
+      notify('Postulación retirada');
+      return;
+    }
+    if (!isSupabaseConfigured()) { notify('No pudimos conectar con la base de datos.'); return; }
+    const supabase = createClient();
+    if (!supabase) { notify('No pudimos conectar con la base de datos.'); return; }
+    const { error } = await supabase.rpc('creator_withdraw_application', { p_application_id: id });
+    if (error) { notify(error.message); return; }
+    setApplications(v => v.map(a => a.id === id ? { ...a, status: 'withdrawn' } : a));
+    notify('Postulación retirada');
+  }
+
+  function campaignStatusLabel(status: Campaign['status']) {
+    if (status === 'open') return 'Activa';
+    if (status === 'draft') return 'Borrador';
+    if (status === 'in_progress') return 'En curso';
+    if (status === 'paused') return 'Pausada';
+    if (status === 'completed') return 'Completada';
+    if (status === 'cancelled') return 'Cancelada';
+    return status;
   }
 
   async function saveProfile(event:FormEvent<HTMLFormElement>) {
     event.preventDefault(); const f = new FormData(event.currentTarget);
     const changes = { name:String(f.get('name')), username:String(f.get('username')), city:String(f.get('city')), bio:String(f.get('bio')), businessName:String(f.get('businessName')||'') };
-    if (isSupabaseConfigured()) {
-      const supabase=createClient();
-      const { error }=await supabase!.from('profiles').update({full_name:changes.name,username:changes.username,city:changes.city,bio:changes.bio}).eq('id',profile!.id);
-      if(error){notify(error.message);return;}
-      if(isBusiness && changes.businessName) await supabase!.from('business_profiles').upsert({profile_id:profile!.id,business_name:changes.businessName},{onConflict:'profile_id'});
+    if (demo) {
+      setProfile(p=>p?{...p,...changes}:p); notify('Perfil actualizado');
+      return;
+    }
+    if (!isSupabaseConfigured() || !profile) { notify('No pudimos conectar con la base de datos.'); return; }
+    const supabase=createClient();
+    if (!supabase) { notify('No pudimos conectar con la base de datos.'); return; }
+    const { error }=await supabase.from('profiles').update({full_name:changes.name,username:changes.username,city:changes.city,bio:changes.bio}).eq('id',profile.id);
+    if(error){notify(error.message);return;}
+    if(isBusiness && changes.businessName) {
+      const { error: bizErr } = await supabase.from('business_profiles').upsert({profile_id:profile.id,business_name:changes.businessName},{onConflict:'profile_id'});
+      if (bizErr) { notify(bizErr.message); return; }
     }
     setProfile(p=>p?{...p,...changes}:p); notify('Perfil actualizado');
   }
@@ -247,15 +469,17 @@ export function Dashboard() {
     if (!text || !activeConversation || !profile) return;
 
     if (demo) {
-      setChatMessages(v => [...v, { id: String(Date.now()), mine: true, text, time: new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) }]);
+      setChatMessages(v => [...v, { id: crypto.randomUUID(), mine: true, text, time: new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) }]);
       event.currentTarget.reset();
       return;
     }
 
+    if (!isSupabaseConfigured()) { notify('No pudimos conectar con la base de datos.'); return; }
     const supabase = createClient();
-    if (!supabase) return;
+    if (!supabase) { notify('No pudimos conectar con la base de datos.'); return; }
     const { data, error } = await postChatMessage(supabase, activeConversation.id, profile.id, text);
     if (error) { notify(error.message); return; }
+    if (!data) { notify('No pudimos enviar el mensaje.'); return; }
     setChatMessages(v => [...v, { id: data.id, mine: true, text: data.body, time: new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) }]);
     event.currentTarget.reset();
   }
@@ -272,7 +496,7 @@ export function Dashboard() {
   return <div className="dashboardApp">
     <aside className={sidebar?'dashSidebar open':'dashSidebar'}>
       <div className="dashLogo"><Logo/><button onClick={()=>setSidebar(false)}><X/></button></div>
-      <nav>{menu.map(([key,label,Icon])=><button key={key} className={tab===key?'active':''} onClick={()=>nav(key)}><Icon size={19}/><span>{label}</span>{key==='messages'&&unreadNotifications>0&&<b>{unreadNotifications}</b>}</button>)}</nav>
+      <nav>{menu.map(([key,label,Icon])=><button key={key} className={tab===key?'active':''} onClick={()=>nav(key)}><Icon size={19}/><span>{label}</span>{key==='messages'&&unreadMessages>0&&<b>{unreadMessages}</b>}</button>)}</nav>
       <div className="sidebarPromo"><Sparkles/><strong>Mejorá tu perfil</strong><p>Completá tus datos para recibir mejores oportunidades.</p><button onClick={()=>nav('profile')}>Completar ahora</button></div>
       <button className="logoutBtn" onClick={logout}><LogOut size={18}/> Cerrar sesión</button>
     </aside>
@@ -280,25 +504,27 @@ export function Dashboard() {
       <header className="dashHeader">
         <button className="dashMenu" onClick={()=>setSidebar(true)}><Menu/></button>
         <div><h1>{menu.find(x=>x[0]===tab)?.[1]}</h1><p>{isBusiness?'Gestioná tu presencia y tus colaboraciones.':'Encontrá oportunidades y hacé crecer tu perfil.'}</p></div>
-        <div className="dashHeaderActions"><Link href="/" className="iconButton" title="Volver al sitio"><ArrowLeft size={18}/></Link><button className="iconButton" aria-label="Notificaciones">{unreadNotifications > 0 && <i aria-hidden />}<Bell size={18}/></button><button className="accountPill" onClick={()=>nav('profile')}><span>{profile.name.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase()}</span><p><strong>{profile.name}</strong><small>{isBusiness?'Negocio':'Creador'}</small></p></button></div>
+        <div className="dashHeaderActions"><Link href="/" className="iconButton" title="Volver al sitio"><ArrowLeft size={18}/></Link><button className="iconButton" type="button" aria-label="Notificaciones" aria-expanded={notificationsOpen} onClick={()=>void openNotificationsPanel()}>{unreadNotifications > 0 && <i aria-hidden />}<Bell size={18}/></button><button className="accountPill" onClick={()=>nav('profile')}><span>{profile.name.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase()}</span><p><strong>{profile.name}</strong><small>{isBusiness?'Negocio':'Creador'}</small></p></button></div>
       </header>
+
+      {notificationsOpen&&<section className="dashPanel notificationsPanel" role="dialog" aria-label="Notificaciones"><div className="panelTitle"><div><h3>Notificaciones</h3><p>{unreadNotifications} sin leer</p></div><button type="button" onClick={()=>void readAllNotifications()}>Marcar todas</button></div>{notificationsLoading&&<p className="loadingLine"/>}{notificationItems.length===0&&!notificationsLoading&&<p className="emptyInline">No tenés notificaciones.</p>}<ul className="notificationList">{notificationItems.map(n=><li key={n.id}><button type="button" className={n.readAt?'read':''} onClick={()=>void readNotification(n.id)}><strong>{n.title}</strong><p>{n.body}</p><time>{new Date(n.createdAt).toLocaleString('es-AR')}</time></button></li>)}</ul></section>}
 
       <div className="dashContent">
         {tab==='overview'&&<>
           <div className="welcomeCard"><div><span className="eyebrow"><Sparkles size={14}/> Tu actividad en KUVO</span><h2>Hola, {profile.name.split(' ')[0]}.</h2><p>{isBusiness?'Gestioná campañas y postulaciones desde tu panel privado.':'Explorá oportunidades y seguí el estado de tus postulaciones.'}</p><button className="primaryBtn" onClick={()=>isBusiness?setCampaignModal(true):nav('campaigns')}>{isBusiness?<><Plus size={18}/> Nueva campaña</>:<>Explorar campañas <ChevronRight size={18}/></>}</button></div><div className="welcomeVisual"><Target size={78}/><span>{applications.length}</span><small>{isBusiness?'postulaciones':'movimientos'}</small></div></div>
           <div className="metricGrid">{metrics.map(({label,value,change,icon:Icon})=><article key={label}><span><Icon/></span><p>{label}</p><strong>{value}</strong><small>{change}</small></article>)}</div>
-          <div className="dashboardColumns"><section className="dashPanel"><div className="panelTitle"><div><h3>{isBusiness?'Campañas recientes':'Oportunidades para vos'}</h3><p>Actividad actual de la cuenta</p></div><button onClick={()=>nav('campaigns')}>Ver todas</button></div><div className="compactCampaigns">{campaigns.slice(0,4).map(c=><button key={c.id} onClick={()=>nav('campaigns')}><span style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}>{c.businessName.slice(0,2).toUpperCase()}</span><p><strong>{c.title}</strong><small>{c.category} · {c.city}</small></p><i className={`status ${c.status}`}>{c.status==='open'?'Activa':c.status}</i><b>{money.format(c.budgetMax)}</b><ChevronRight/></button>)}</div></section><section className="dashPanel"><div className="panelTitle"><div><h3>Resumen</h3><p>Datos de tu cuenta</p></div></div><div className="chartSummary"><div><strong>{applications.filter(a=>a.status==='accepted').length}</strong><span>Aceptadas</span></div><div><strong>{applications.filter(a=>a.status==='pending').length}</strong><span>Pendientes</span></div><div><strong>{campaigns.filter(c=>c.status==='open').length}</strong><span>Campañas abiertas</span></div></div></section></div>
+          <div className="dashboardColumns"><section className="dashPanel"><div className="panelTitle"><div><h3>{isBusiness?'Campañas recientes':'Oportunidades para vos'}</h3><p>Actividad actual de la cuenta</p></div><button onClick={()=>nav('campaigns')}>Ver todas</button></div><div className="compactCampaigns">{campaigns.slice(0,4).map(c=><button key={c.id} onClick={()=>nav('campaigns')}><span style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}>{c.businessName.slice(0,2).toUpperCase()}</span><p><strong>{c.title}</strong><small>{c.category} · {c.city}</small></p><i className={`status ${c.status}`}>{campaignStatusLabel(c.status)}</i><b>{money.format(c.budgetMax)}</b><ChevronRight/></button>)}</div></section><section className="dashPanel"><div className="panelTitle"><div><h3>Resumen</h3><p>Datos de tu cuenta</p></div></div><div className="chartSummary"><div><strong>{applications.filter(a=>a.status==='accepted').length}</strong><span>Aceptadas</span></div><div><strong>{applications.filter(a=>a.status==='pending').length}</strong><span>Pendientes</span></div><div><strong>{campaigns.filter(c=>c.status==='open').length}</strong><span>Campañas abiertas</span></div></div></section></div>
         </>}
 
-        {tab==='campaigns'&&<><div className="contentToolbar"><label><Search/><input placeholder="Buscar campañas"/></label><select><option>Todas</option><option>Activas</option><option>Pausadas</option><option>Completadas</option></select>{isBusiness&&<button className="primaryBtn" onClick={()=>setCampaignModal(true)}><Plus/> Nueva campaña</button>}</div><div className="dashCampaignGrid">{campaigns.map(c=><article key={c.id}><div className="dashCampaignTop"><span style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}>{c.businessName.slice(0,2).toUpperCase()}</span><i className={`status ${c.status}`}>{c.status==='open'?'Activa':c.status}</i></div><small>{c.businessName}</small><h3>{c.title}</h3><p>{c.description}</p><div className="tagRow"><span>{c.category}</span><span>{c.city}</span></div><div className="campaignNumbers"><div><span>Presupuesto</span><strong>{money.format(c.budgetMax)}</strong></div><div><span>Postulantes</span><strong>{c.applicants ?? applications.filter(a=>a.campaignId===c.id).length}</strong></div></div><button className="ghostBtn full" onClick={()=>isBusiness?nav('applications'):setApplyCampaign(c)}>{isBusiness?'Ver postulaciones':'Postularme'}<ChevronRight/></button></article>)}</div></>}
+        {tab==='campaigns'&&<><div className="contentToolbar"><label><Search/><input placeholder="Buscar campañas"/></label><select><option>Todas</option><option>Activas</option><option>Pausadas</option><option>Completadas</option></select>{isBusiness&&<button className="primaryBtn" onClick={()=>setCampaignModal(true)}><Plus/> Nueva campaña</button>}</div><div className="dashCampaignGrid">{campaigns.map(c=><article key={c.id}><div className="dashCampaignTop"><span style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}>{c.businessName.slice(0,2).toUpperCase()}</span><i className={`status ${c.status}`}>{campaignStatusLabel(c.status)}</i></div><small>{c.businessName}</small><h3>{c.title}</h3><p>{c.description}</p><div className="tagRow"><span>{c.category}</span><span>{c.city}</span></div><div className="campaignNumbers"><div><span>Presupuesto</span><strong>{money.format(c.budgetMax)}</strong></div><div><span>Postulantes</span><strong>{c.applicants ?? applications.filter(a=>a.campaignId===c.id).length}</strong></div></div><button className="ghostBtn full" onClick={()=>isBusiness?nav('applications'):setApplyCampaign(c)}>{isBusiness?'Ver postulaciones':'Postularme'}<ChevronRight/></button></article>)}</div></>}
 
-        {tab==='applications'&&<section className="dashPanel applicationPanel"><div className="panelTitle"><div><h3>{isBusiness?'Postulaciones recibidas':'Mis postulaciones'}</h3><p>{applications.length} movimientos registrados</p></div></div><div className="applicationTable"><div className="tableHead"><span>{isBusiness?'Creador':'Campaña'}</span><span>Propuesta</span><span>Estado</span><span>Fecha</span><span>Acciones</span></div>{applications.map(a=><div className="tableRow" key={a.id}><div className="applicationPerson"><span>{(isBusiness?a.creatorName:a.campaignTitle).split(' ').map(x=>x[0]).slice(0,2).join('')}</span><p><strong>{isBusiness?a.creatorName:a.campaignTitle}</strong><small>{isBusiness?a.campaignTitle:a.message}</small></p></div><strong>{money.format(a.proposedPrice)}</strong><i className={`status ${a.status}`}>{a.status==='pending'?'Pendiente':a.status==='shortlisted'?'Preseleccionada':a.status==='accepted'?'Aceptada':'Rechazada'}</i><span>{new Date(a.createdAt).toLocaleDateString('es-AR')}</span><div className="rowActions">{isBusiness&&a.status!=='accepted'&&<><button title="Preseleccionar" onClick={()=>updateApplication(a.id,'shortlisted')}><BadgeCheck/></button><button title="Aceptar" onClick={()=>updateApplication(a.id,'accepted')}><Check/></button><button title="Rechazar" onClick={()=>updateApplication(a.id,'rejected')}><X/></button></>}<button title="Mensaje" onClick={()=>nav('messages')}><MessageCircle/></button></div></div>)}</div></section>}
+        {tab==='applications'&&<section className="dashPanel applicationPanel"><div className="panelTitle"><div><h3>{isBusiness?'Postulaciones recibidas':'Mis postulaciones'}</h3><p>{applications.length} movimientos registrados</p></div></div><div className="applicationTable"><div className="tableHead"><span>{isBusiness?'Creador':'Campaña'}</span><span>Propuesta</span><span>Estado</span><span>Fecha</span><span>Acciones</span></div>{applications.map(a=><div className="tableRow" key={a.id}><div className="applicationPerson"><span>{(isBusiness?a.creatorName:a.campaignTitle).split(' ').map(x=>x[0]).slice(0,2).join('')}</span><p><strong>{isBusiness?a.creatorName:a.campaignTitle}</strong><small>{isBusiness?a.campaignTitle:a.message}</small></p></div><strong>{money.format(a.proposedPrice)}</strong><i className={`status ${a.status}`}>{applicationStatusLabel(a.status)}</i><span>{new Date(a.createdAt).toLocaleDateString('es-AR')}</span><div className="rowActions">{isBusiness&&businessCanShortlist(a.status)&&<button title="Preseleccionar" onClick={()=>updateApplication(a.id,'shortlisted')}><BadgeCheck/></button>}{isBusiness&&businessCanAccept(a.status)&&<button title="Aceptar" onClick={()=>updateApplication(a.id,'accepted')}><Check/></button>}{isBusiness&&businessCanReject(a.status)&&<button title="Rechazar" onClick={()=>updateApplication(a.id,'rejected')}><X/></button>}{!isBusiness&&creatorCanWithdraw(a.status)&&<button title="Retirar" onClick={()=>void withdrawApplication(a.id)}><X/></button>}{a.status==='accepted'&&<button title="Mensaje" onClick={()=>nav('messages')}><MessageCircle/></button>}</div></div>)}</div></section>}
 
-        {tab==='messages'&&<div className="messagesLayout"><aside className="conversationList"><div className="conversationSearch"><Search/><input placeholder="Buscar conversación"/></div>{conversations.length===0&&<p className="emptyInline">Todavía no tenés conversaciones.</p>}{conversations.map(m=><button key={m.id} type="button" className={activeConversation?.id===m.id?'active':''} onClick={()=>void openConversation(m)}><span>{m.initials}</span><p><strong>{m.title}</strong><small>{m.preview}</small></p><time>{m.time}</time>{m.unread>0&&<b>{m.unread}</b>}</button>)}</aside><section className="chatPanel">{activeConversation?(<><header><span>{activeConversation.initials}</span><p><strong>{activeConversation.title}</strong><small>Campaña vinculada</small></p><button type="button"><FileText/></button></header><div className="chatBody">{messagesLoading&&<p className="loadingLine"/>}{chatMessages.map(m=><div key={m.id} className={m.mine?'mine':''}><p>{m.text}</p><time>{m.time}</time></div>)}</div><form onSubmit={sendMessage}><input name="message" placeholder="Escribí un mensaje..." autoComplete="off"/><button type="submit"><Send/></button></form></>):(<div className="emptyState compact"><MessageCircle/><p>Elegí una conversación de la lista.</p></div>)}</section></div>}
+        {tab==='messages'&&<div className="messagesLayout"><aside className="conversationList">{conversations.length===0&&<p className="emptyInline">Todavía no tenés conversaciones.</p>}{conversations.map(m=><button key={m.id} type="button" className={activeConversation?.id===m.id?'active':''} onClick={()=>void openConversation(m)}><span>{m.initials}</span><p><strong>{m.title}</strong><small>{m.preview}</small></p><time>{m.time}</time>{m.unread>0&&<b>{m.unread}</b>}</button>)}</aside><section className="chatPanel">{activeConversation?(<><header><span>{activeConversation.initials}</span><p><strong>{activeConversation.title}</strong><small>Campaña vinculada</small></p></header><div className="chatBody">{messagesLoading&&<p className="loadingLine"/>}{chatMessages.map(m=><div key={m.id} className={m.mine?'mine':''}><p>{m.text}</p><time>{m.time}</time></div>)}</div><form onSubmit={sendMessage}><input name="message" placeholder="Escribí un mensaje..." autoComplete="off"/><button type="submit"><Send/></button></form></>):(<div className="emptyState compact"><MessageCircle/><p>Elegí una conversación de la lista.</p></div>)}</section></div>}
 
-        {tab==='favorites'&&<><div className="sectionHeading compact"><h2>Creadores guardados</h2><p>Tu selección personal para futuras campañas.</p></div>{favoriteCreators.length===0?(<div className="emptyState"><Heart/><h3>Sin favoritos todavía</h3><p>Guardá creadores desde el marketplace para verlos acá.</p><Link href="/explorar" className="primaryBtn">Explorar creadores</Link></div>):(<div className="creatorGrid inDashboard">{favoriteCreators.map(c=><article className="creatorCard" key={c.id}><div className="creatorCover" style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}><span>{c.category}</span><button type="button" aria-label="Quitar favorito"><Heart fill="currentColor"/></button></div><div className="creatorContent"><div className="creatorAvatar" style={{background:`linear-gradient(135deg,${c.gradient[1]},${c.gradient[0]})`}}>{c.initials}</div><div className="creatorName"><h3>{c.name}</h3>{c.verified&&<BadgeCheck/>}</div><p className="creatorHandle">{c.username} · {c.city}</p><div className="cardFooter"><p><span>Desde</span><strong>{money.format(c.startingPrice)}</strong></p><Link href="/explorar" className="smallBtn">Ver en marketplace</Link></div></div></article>)}</div>)}</>}
+        {tab==='favorites'&&<><div className="sectionHeading compact"><h2>Creadores guardados</h2><p>Tu selección personal para futuras campañas.</p></div>{favoriteCreators.length===0?(<div className="emptyState"><Heart/><h3>Sin favoritos todavía</h3><p>Guardá creadores desde el marketplace para verlos acá.</p><Link href="/explorar" className="primaryBtn">Explorar creadores</Link></div>):(<div className="creatorGrid inDashboard">{favoriteCreators.map(c=><article className="creatorCard" key={c.id}><div className="creatorCover" style={{background:`linear-gradient(135deg,${c.gradient[0]},${c.gradient[1]})`}}><span>{c.category}</span></div><div className="creatorContent"><div className="creatorAvatar" style={{background:`linear-gradient(135deg,${c.gradient[1]},${c.gradient[0]})`}}>{c.initials}</div><div className="creatorName"><h3>{c.name}</h3>{c.verified&&<BadgeCheck/>}</div><p className="creatorHandle">{c.username} · {c.city}</p><div className="cardFooter"><p><span>Desde</span><strong>{money.format(c.startingPrice)}</strong></p><Link href="/explorar" className="smallBtn">Ver en marketplace</Link></div></div></article>)}</div>)}</>}
 
-        {tab==='profile'&&<div className="profileSettings"><section className="dashPanel"><div className="profileBanner"><div>{profile.name.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase()}</div><button className="ghostBtn">Cambiar foto</button></div><form onSubmit={saveProfile} className="settingsForm"><div className="formGrid"><label>Nombre completo<input name="name" defaultValue={profile.name} required/></label><label>Nombre de usuario<input name="username" defaultValue={profile.username}/></label>{isBusiness&&<label>Nombre del negocio<input name="businessName" defaultValue={profile.businessName}/></label>}<label>Ciudad<input name="city" defaultValue={profile.city}/></label><label className="span2">Descripción<textarea name="bio" defaultValue={profile.bio} rows={5}/></label></div><div className="settingsActions"><button type="submit" className="primaryBtn">Guardar cambios</button></div></form></section><aside className="dashPanel profileScore"><Activity/><strong>{profileScoreLabel}</strong><h3>{isBusiness?'Perfil completado':'KUVO Score'}</h3><p>Completá redes, portfolio y datos de contacto para mejorar tu visibilidad.</p><ul><li><Check/> Información principal</li><li><Check/> Correo verificado</li><li><Clock3/> Vincular redes sociales</li></ul></aside></div>}
+        {tab==='profile'&&<div className="profileSettings"><section className="dashPanel"><div className="profileBanner"><div>{profile.name.split(' ').map(x=>x[0]).slice(0,2).join('').toUpperCase()}</div></div><form onSubmit={saveProfile} className="settingsForm"><div className="formGrid"><label>Nombre completo<input name="name" defaultValue={profile.name} required/></label><label>Nombre de usuario<input name="username" defaultValue={profile.username}/></label>{isBusiness&&<label>Nombre del negocio<input name="businessName" defaultValue={profile.businessName}/></label>}<label>Ciudad<input name="city" defaultValue={profile.city}/></label><label className="span2">Descripción<textarea name="bio" defaultValue={profile.bio} rows={5}/></label></div><div className="settingsActions"><button type="submit" className="primaryBtn">Guardar cambios</button></div></form></section><aside className="dashPanel profileScore"><Activity/><strong>{profileScoreLabel}</strong><h3>{isBusiness?'Perfil completado':'KUVO Score'}</h3><p>Completá redes, portfolio y datos de contacto para mejorar tu visibilidad.</p><ul><li><Check/> Información principal</li><li><Check/> Correo verificado</li><li><Clock3/> Vincular redes sociales</li></ul></aside></div>}
       </div>
     </div>
 

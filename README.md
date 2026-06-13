@@ -37,9 +37,12 @@ Abrí `http://localhost:3000`. Sin variables de entorno, KUVO arranca en modo de
 
 1. Creá un proyecto en Supabase.
 2. Abrí **SQL Editor**.
-3. Ejecutá, en este orden:
+3. Ejecutá, en este orden (proyecto existente: solo lo que falte):
    - `supabase/migrations/001_schema.sql`
-   - `supabase/migrations/002_seed.sql`
+   - `supabase/migrations/003_security_hardening.sql`
+   - `supabase/migrations/004_add_campaign_in_progress.sql` (sesión separada)
+   - `supabase/migrations/005_production_hardening.sql`
+   - `supabase/migrations/002_seed.sql` (solo desarrollo)
 4. Copiá `.env.example` como `.env.local`.
 5. Completá las variables:
 
@@ -62,14 +65,22 @@ No coloques nunca la clave `service_role`. La clave `anon` es pública por dise�
 Primero registrá una cuenta normalmente. Después ejecutá en Supabase SQL Editor, reemplazando el correo:
 
 ```sql
-update public.profiles
-set role = 'admin'
-where account_id = (
-  select id from auth.users where email = 'admin@tu-dominio.com'
-);
+select public.bootstrap_first_admin('admin@tu-dominio.com');
 ```
 
+(solo si aún no hay administrador activo; ejecutar en SQL Editor como postgres).
+
 El administrador entra desde `/admin`.
+
+## Verificación de seguridad
+
+Tras aplicar las migraciones en Supabase remoto:
+
+1. Ejecutá los scripts SQL en `supabase/tests/` (003, 004, 005).
+2. Configurá las cuentas `VERIFY_*` y `VERIFY_BLOQUEADO_*` en `.env.local`.
+3. Corré `npm run verify:post-migration`.
+
+Detalle completo en `SUPABASE_SETUP.md`.
 
 ## Subir a Vercel
 
