@@ -25,6 +25,8 @@ const ACCOUNT_VARS = [
   'VERIFY_CREADOR_PASSWORD',
   'VERIFY_TERCERO_EMAIL',
   'VERIFY_TERCERO_PASSWORD',
+  'VERIFY_BLOQUEADO_EMAIL',
+  'VERIFY_BLOQUEADO_PASSWORD',
 ];
 
 function loadEnv() {
@@ -60,6 +62,7 @@ const preamble = {
   loginNegocio: 'PENDING',
   loginCreador: 'PENDING',
   loginTercero: 'PENDING',
+  loginBloqueado: 'PENDING',
   demoModeDisabled: 'PENDING',
   docker: 'NO UTILIZADO',
 };
@@ -125,7 +128,7 @@ function client(accessToken) {
 }
 
 /**
- * @param {'negocio'|'creador'|'tercero'} roleKey
+ * @param {'negocio'|'creador'|'tercero'|'bloqueado'} roleKey
  */
 async function loginAccount(roleKey) {
   const prefix = roleKey.toUpperCase();
@@ -166,7 +169,7 @@ async function getProfile(supabase) {
   if (userErr || !user) throw new Error('No se pudo obtener usuario autenticado');
   const { data, error } = await supabase
     .from('profiles')
-    .select('id, role, account_id')
+    .select('id, role, account_id, active')
     .eq('account_id', user.id)
     .single();
   if (error) throw new Error(`Perfil no encontrado: ${error.message}`);
@@ -250,13 +253,46 @@ async function runOffensiveTests(business, creator, third) {
         budget_min: 10000,
         budget_max: 50000,
         deliverables: ['1 reel'],
-        status: 'open',
+        status: 'draft',
         deadline: '2026-12-31',
       })
-      .select('id')
+      .select('id, status')
       .single();
     if (campaign) cleanup.campaignId = campaign.id;
-    record('R5', 'Negocio crea campaña open', !campErr && campaign?.id ? 'PASS' : 'FAIL', campErr?.message ?? 'sin id');
+    record('R5', 'Negocio crea campaña draft', !campErr && campaign?.status === 'draft' ? 'PASS' : 'FAIL', campErr?.message ?? campaign?.status ?? 'sin id');
+
+    const { error: openInsertErr } = await business.supabase
+      .from('campaigns')
+      .insert({
+        business_id: bp.id,
+        title: `Campaña open ${runId}`,
+        description: 'No debe insertarse como open.',
+        category: 'Tecnología',
+        city: 'San Juan',
+        budget_min: 10000,
+        budget_max: 50000,
+        deliverables: ['1 reel'],
+        status: 'open',
+        deadline: '2026-12-31',
+      });
+    record('R5b', 'Negocio no inserta campaña open directamente', openInsertErr ? 'PASS' : 'FAIL', openInsertErr?.message ?? 'insert permitido');
+
+    let published = false;
+    if (campaign?.id) {
+      const { error: publishErr } = await business.supabase.rpc('business_publish_campaign', {
+        p_campaign_id: campaign.id,
+      });
+      if (isRpcMissing(publishErr)) {
+        record('R5c', 'Publicar campaña vía business_publish_campaign', 'FAIL', `PGRST202 (${publishErr?.message})`);
+      } else if (publishErr) {
+        record('R5c', 'Publicar campaña vía business_publish_campaign', 'FAIL', publishErr.message);
+      } else {
+        published = true;
+        record('R5c', 'Publicar campaña vía business_publish_campaign', 'PASS', 'draft→open');
+      }
+    } else {
+      record('R5c', 'Publicar campaña vía business_publish_campaign', 'SKIPPED', 'Sin campaña draft');
+    }
 
     const { data: creatorProf, error: creatorProfErr } = await creator.supabase
       .from('creator_profiles')
@@ -265,7 +301,8 @@ async function runOffensiveTests(business, creator, third) {
       .single();
 
     let application = null;
-    if (campErr || !campaign?.id || creatorProfErr || !creatorProf?.id) {
+    let convId = null;
+    if (campErr || !campaign?.id || !published || creatorProfErr || !creatorProf?.id) {
       record('R6', 'Creador crea postulación', 'SKIPPED', creatorProfErr?.message ?? campErr?.message ?? 'prerrequisito');
     } else {
       const { data: app, error: appErr } = await creator.supabase
@@ -281,6 +318,17 @@ async function runOffensiveTests(business, creator, third) {
       application = app;
       if (app?.id) cleanup.applicationId = app.id;
       record('R6', 'Creador crea postulación pending', !appErr && app?.status === 'pending' ? 'PASS' : 'FAIL', appErr?.message ?? app?.status);
+
+      const { error: badStatusErr } = await creator.supabase
+        .from('applications')
+        .insert({
+          campaign_id: campaign.id,
+          creator_id: creatorProf.id,
+          message: 'Intento accepted',
+          proposed_price: 25000,
+          status: 'accepted',
+        });
+      record('R6b', 'Creador no inserta postulación accepted', badStatusErr ? 'PASS' : 'FAIL', badStatusErr?.message ?? 'insert permitido');
     }
 
     if (!application?.id) {
@@ -317,9 +365,10 @@ async function runOffensiveTests(business, creator, third) {
         record('R9', 'Negocio shortlist vía RPC business_shortlist_application', 'PASS', 'status→shortlisted');
       }
 
-      const { data: convId, error: acceptErr } = await business.supabase.rpc('business_accept_application', {
+      const { data: convIdRpc, error: acceptErr } = await business.supabase.rpc('business_accept_application', {
         p_application_id: application.id,
       });
+      convId = convIdRpc;
       if (isRpcMissing(acceptErr)) {
         record('R10', 'Negocio acepta vía RPC business_accept_application', 'FAIL', `PGRST202 (${acceptErr?.message})`);
       } else if (acceptErr) {
@@ -337,6 +386,29 @@ async function runOffensiveTests(business, creator, third) {
             !acceptErr2 && convId2 === convId ? 'PASS' : 'FAIL',
             acceptErr2?.message ?? `conv1=${convId} conv2=${convId2}`,
           );
+
+          const { data: bizCtx2 } = await getProfile(business.supabase).catch(() => ({ profile: bizCtx.profile }));
+          const { error: memberTamperErr } = await business.supabase
+            .from('conversation_members')
+            .update({ conversation_id: crypto.randomUUID() })
+            .eq('conversation_id', convId)
+            .eq('profile_id', bizCtx2.profile.id);
+          record('R25', 'No modificar conversation_id en membership', memberTamperErr ? 'PASS' : 'FAIL', memberTamperErr?.message ?? 'update permitido');
+
+          const { data: creatorNotifs } = await creator.supabase
+            .from('notifications')
+            .select('id, title')
+            .order('created_at', { ascending: false })
+            .limit(1);
+          if (creatorNotifs?.[0]?.id) {
+            const { error: notifTamperErr } = await creator.supabase
+              .from('notifications')
+              .update({ title: 'Hackeado' })
+              .eq('id', creatorNotifs[0].id);
+            record('R26', 'No modificar title de notificación', notifTamperErr ? 'PASS' : 'FAIL', notifTamperErr?.message ?? 'update permitido');
+          } else {
+            record('R26', 'No modificar title de notificación', 'SKIPPED', 'Sin notificación de prueba');
+          }
         } else {
           record('R10b', 'Segunda accept devuelve misma conversación', 'SKIPPED', 'Sin conversación inicial');
         }
@@ -432,6 +504,27 @@ async function runOffensiveTests(business, creator, third) {
     bootstrapErr?.message ?? 'RPC ejecutada sin error',
   );
 
+  const { data: reportRow, error: reportCreateErr } = await creator.supabase
+    .from('reports')
+    .insert({
+      reporter_profile_id: creCtx.profile.id,
+      target_type: 'profile',
+      target_id: thirdCtx.profile.id,
+      reason: 'Prueba ofensiva verificador',
+    })
+    .select('id')
+    .single();
+
+  if (reportCreateErr || !reportRow?.id) {
+    record('R24', 'Usuario normal no resuelve reportes', 'SKIPPED', reportCreateErr?.message ?? 'sin reporte');
+  } else {
+    const { error: reportUpdateErr } = await creator.supabase
+      .from('reports')
+      .update({ status: 'resolved', resolved_at: new Date().toISOString() })
+      .eq('id', reportRow.id);
+    record('R24', 'Usuario normal no resuelve reportes', reportUpdateErr ? 'PASS' : 'FAIL', reportUpdateErr?.message ?? 'update permitido');
+  }
+
   const { data: thirdReports, error: reportsErr } = await third.supabase
     .from('reports')
     .select('id');
@@ -461,6 +554,93 @@ async function runOffensiveTests(business, creator, third) {
   }
 }
 
+async function runBlockedAccountTests(blocked) {
+  let ctx;
+  try {
+    ctx = await getProfile(blocked.supabase);
+  } catch (err) {
+    record('B0', 'Perfil VERIFY_BLOQUEADO', 'ERROR', err instanceof Error ? err.message : String(err));
+    return;
+  }
+
+  record('B1', 'Cuenta bloqueada tiene active=false', ctx.profile.active === false ? 'PASS' : 'FAIL', `active=${ctx.profile.active}`);
+  record(
+    'B_panel',
+    'Cuenta bloqueada no opera en panel (middleware active=false)',
+    ctx.profile.active === false ? 'PASS' : 'FAIL',
+    'middleware.ts redirige /panel cuando active=false',
+  );
+
+  const { data: convs, error: convErr } = await blocked.supabase.from('conversations').select('id');
+  record('B2', 'Bloqueado no lee conversaciones', !convErr && (convs?.length ?? 0) === 0 ? 'PASS' : 'FAIL', convErr?.message ?? `filas=${convs?.length ?? 0}`);
+
+  const { data: msgs, error: msgErr } = await blocked.supabase.from('messages').select('id');
+  record('B3', 'Bloqueado no lee mensajes', !msgErr && (msgs?.length ?? 0) === 0 ? 'PASS' : 'FAIL', msgErr?.message ?? `filas=${msgs?.length ?? 0}`);
+
+  const { data: notifs, error: notifErr } = await blocked.supabase.from('notifications').select('id');
+  record('B4', 'Bloqueado no lee notificaciones', !notifErr && (notifs?.length ?? 0) === 0 ? 'PASS' : 'FAIL', notifErr?.message ?? `filas=${notifs?.length ?? 0}`);
+
+  const { error: publishErr } = await blocked.supabase.rpc('business_publish_campaign', {
+    p_campaign_id: crypto.randomUUID(),
+  });
+  record(
+    'B5',
+    'Bloqueado no publica campañas',
+    publishErr && classifyRpcError(publishErr) !== 'rpc_missing' ? 'PASS' : 'FAIL',
+    publishErr?.message ?? 'RPC sin error',
+  );
+
+  const { data: openCampaign } = await blocked.supabase.from('campaigns').select('id').eq('status', 'open').limit(1).maybeSingle();
+  if (!openCampaign?.id) {
+    record('B6', 'Bloqueado no se postula', 'SKIPPED', 'Sin campaña open pública');
+  } else {
+    const { data: cp } = await blocked.supabase.from('creator_profiles').select('id').eq('profile_id', ctx.profile.id).maybeSingle();
+    if (!cp?.id) {
+      const { error: applyErr } = await blocked.supabase.from('applications').insert({
+        campaign_id: openCampaign.id,
+        creator_id: crypto.randomUUID(),
+        message: 'Intento bloqueado',
+        proposed_price: 1000,
+      });
+      record('B6', 'Bloqueado no se postula', applyErr ? 'PASS' : 'FAIL', applyErr?.message ?? 'insert permitido');
+    } else {
+      const { error: applyErr } = await blocked.supabase.from('applications').insert({
+        campaign_id: openCampaign.id,
+        creator_id: cp.id,
+        message: 'Intento bloqueado',
+        proposed_price: 1000,
+      });
+      record('B6', 'Bloqueado no se postula', applyErr ? 'PASS' : 'FAIL', applyErr?.message ?? 'insert permitido');
+    }
+  }
+
+  const { error: sendErr } = await blocked.supabase.from('messages').insert({
+    conversation_id: crypto.randomUUID(),
+    sender_profile_id: ctx.profile.id,
+    body: 'Intento bloqueado',
+  });
+  record('B7', 'Bloqueado no envía mensajes', sendErr ? 'PASS' : 'FAIL', sendErr?.message ?? 'insert permitido');
+
+  const { error: uploadErr } = await blocked.supabase.storage.from('avatars').upload(
+    `${ctx.profile.id}/verify-blocked.webp`,
+    new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+    { contentType: 'image/png', upsert: true },
+  );
+  record('B8', 'Bloqueado no carga archivos', uploadErr ? 'PASS' : 'FAIL', uploadErr?.message ?? 'upload permitido');
+
+  const { error: profileUpdateErr } = await blocked.supabase
+    .from('profiles')
+    .update({ bio: 'Intento bloqueado' })
+    .eq('id', ctx.profile.id);
+  record('B9', 'Bloqueado no actualiza perfil', profileUpdateErr ? 'PASS' : 'FAIL', profileUpdateErr?.message ?? 'update permitido');
+
+  const { error: favInsertErr } = await blocked.supabase.from('favorites').insert({
+    account_id: ctx.user.id,
+    creator_id: '00000000-0000-0000-0000-000000000001',
+  });
+  record('B10', 'Bloqueado no guarda favoritos', favInsertErr ? 'PASS' : 'FAIL', favInsertErr?.message ?? 'insert permitido');
+}
+
 async function cleanupTestData(business) {
   if (!business?.supabase) return;
   const sb = business.supabase;
@@ -471,7 +651,7 @@ async function cleanupTestData(business) {
 
   if (cleanup.campaignId) {
     const { data: camp } = await sb.from('campaigns').select('status').eq('id', cleanup.campaignId).maybeSingle();
-    if (camp?.status === 'open') {
+    if (camp?.status === 'draft') {
       await sb.from('campaigns').delete().eq('id', cleanup.campaignId);
     } else {
       console.log(`[INFO] Limpieza: campaña ${cleanup.campaignId} conservada (estado=${camp?.status ?? 'desconocido'})`);
@@ -486,6 +666,7 @@ function printPreamble() {
   console.log(`Login negocio: ${preamble.loginNegocio}`);
   console.log(`Login creador: ${preamble.loginCreador}`);
   console.log(`Login tercero: ${preamble.loginTercero}`);
+  console.log(`Login bloqueado: ${preamble.loginBloqueado}`);
   console.log(`Modo demo desactivado: ${preamble.demoModeDisabled}`);
   console.log(`Docker: ${preamble.docker}`);
   console.log(`Run ID: ${runId}`);
@@ -542,8 +723,8 @@ async function main() {
   /** @type {Awaited<ReturnType<typeof loginAccount>>[]} */
   const sessions = [];
 
-  for (const [key, label] of [['negocio', 'Negocio'], ['creador', 'Creador'], ['tercero', 'Tercero']]) {
-    const preambleKey = { negocio: 'loginNegocio', creador: 'loginCreador', tercero: 'loginTercero' }[key];
+  for (const [key, label] of [['negocio', 'Negocio'], ['creador', 'Creador'], ['tercero', 'Tercero'], ['bloqueado', 'Bloqueado']]) {
+    const preambleKey = { negocio: 'loginNegocio', creador: 'loginCreador', tercero: 'loginTercero', bloqueado: 'loginBloqueado' }[key];
     const result = await loginAccount(key);
     if (result.ok) {
       preamble[preambleKey] = 'PASS';
@@ -558,16 +739,17 @@ async function main() {
 
   printPreamble();
 
-  if (sessions.length !== 3) {
-    console.error('\nSuite detenida: las tres cuentas VERIFY_* deben existir, estar confirmadas e iniciar sesión con contraseña correcta.');
+  if (sessions.length !== 4) {
+    console.error('\nSuite detenida: las cuatro cuentas VERIFY_* (incl. VERIFY_BLOQUEADO_*) deben existir, estar confirmadas e iniciar sesión.');
     printSummary();
     process.exit(1);
   }
 
-  const [business, creator, third] = sessions;
+  const [business, creator, third, blocked] = sessions;
 
   try {
     await runOffensiveTests(business, creator, third);
+    await runBlockedAccountTests(blocked);
   } catch (err) {
     record('RUN', 'Ejecución pruebas ofensivas', 'ERROR', err instanceof Error ? err.message : String(err));
   } finally {

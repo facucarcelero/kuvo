@@ -81,6 +81,133 @@ begin
 end;
 $$;
 
+create or replace function public.guard_conversation_member_fields()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if new.conversation_id is distinct from old.conversation_id
+     or new.profile_id is distinct from old.profile_id
+     or new.joined_at is distinct from old.joined_at then
+    raise exception 'No podés modificar membresía.';
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.guard_notification_fields()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if new.account_id is distinct from old.account_id
+     or new.title is distinct from old.title
+     or new.body is distinct from old.body
+     or new.action_url is distinct from old.action_url
+     or new.created_at is distinct from old.created_at then
+    raise exception 'No podés modificar campos de la notificación.';
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.guard_review_fields()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if new.campaign_id is distinct from old.campaign_id
+     or new.reviewer_profile_id is distinct from old.reviewer_profile_id
+     or new.reviewed_profile_id is distinct from old.reviewed_profile_id then
+    raise exception 'No podés modificar los participantes de una reseña.';
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.guard_application_insert()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if public.is_admin() then
+    return new;
+  end if;
+  if new.status is distinct from 'pending' then
+    raise exception 'Las postulaciones deben crearse como pending.';
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.guard_report_fields()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if new.reporter_profile_id is distinct from old.reporter_profile_id
+     or new.target_type is distinct from old.target_type
+     or new.target_id is distinct from old.target_id
+     or new.reason is distinct from old.reason
+     or new.details is distinct from old.details
+     or new.created_at is distinct from old.created_at then
+    raise exception 'No podés modificar los datos base de un reporte.';
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.guard_campaign_status_fields()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if public.is_admin() then
+    return new;
+  end if;
+  if current_setting('kuvo.allow_campaign_status', true) <> 'on' then
+    if new.status is distinct from old.status then
+      raise exception 'Los cambios de estado de campaña solo pueden hacerse mediante RPC.';
+    end if;
+  end if;
+  if new.business_id is distinct from old.business_id then
+    raise exception 'No podés modificar el negocio de una campaña.';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists guard_campaigns_status on public.campaigns;
+create trigger guard_campaigns_status
+  before update on public.campaigns
+  for each row execute function public.guard_campaign_status_fields();
+
+drop trigger if exists guard_conversation_members_fields on public.conversation_members;
+create trigger guard_conversation_members_fields
+  before update on public.conversation_members
+  for each row execute function public.guard_conversation_member_fields();
+
+drop trigger if exists guard_notifications_fields on public.notifications;
+create trigger guard_notifications_fields
+  before update on public.notifications
+  for each row execute function public.guard_notification_fields();
+
+drop trigger if exists guard_reviews_fields on public.reviews;
+create trigger guard_reviews_fields
+  before update on public.reviews
+  for each row execute function public.guard_review_fields();
+
+drop trigger if exists guard_applications_insert on public.applications;
+create trigger guard_applications_insert
+  before insert on public.applications
+  for each row execute function public.guard_application_insert();
+
 -- ---------------------------------------------------------------------------
 -- 1.1 Cuenta activa
 -- ---------------------------------------------------------------------------
@@ -178,6 +305,15 @@ revoke update on public.applications from authenticated;
 grant update (message, proposed_price)
   on public.applications to authenticated;
 
+revoke update on public.conversation_members from authenticated;
+grant update (last_read_at) on public.conversation_members to authenticated;
+
+revoke update on public.notifications from authenticated;
+grant update (read_at) on public.notifications to authenticated;
+
+revoke update on public.reviews from authenticated;
+grant update (rating, comment) on public.reviews to authenticated;
+
 -- ---------------------------------------------------------------------------
 -- Tabla reports (moderación)
 -- ---------------------------------------------------------------------------
@@ -213,10 +349,18 @@ create policy "admins read reports"
 drop policy if exists "admins update reports" on public.reports;
 create policy "admins update reports"
   on public.reports for update
-  using (public.is_admin());
+  using (public.is_admin())
+  with check (public.is_admin());
 
 revoke all on public.reports from anon;
 grant select, insert on public.reports to authenticated;
+revoke update on public.reports from authenticated;
+grant update (status, resolved_at) on public.reports to authenticated;
+
+drop trigger if exists guard_reports_fields on public.reports;
+create trigger guard_reports_fields
+  before update on public.reports
+  for each row execute function public.guard_report_fields();
 
 -- ---------------------------------------------------------------------------
 -- Helper: transiciones de campaña
@@ -261,7 +405,9 @@ begin
   select * into v_campaign from public.campaigns where id = p_campaign_id for update;
   if not found then raise exception 'Campaña no encontrada.'; end if;
   perform public._assert_campaign_transition(v_campaign.status, p_to);
+  perform set_config('kuvo.allow_campaign_status', 'on', true);
   update public.campaigns set status = p_to, updated_at = now() where id = p_campaign_id;
+  perform set_config('kuvo.allow_campaign_status', 'off', true);
 end;
 $$;
 
@@ -475,7 +621,23 @@ begin
     if v_conversation_id is null then
       raise exception 'Postulación aceptada sin conversación asociada.';
     end if;
+    if (select count(*) from public.conversation_members where conversation_id = v_conversation_id) <> 2 then
+      raise exception 'Conversación con membresía inválida.';
+    end if;
+    if not exists(
+      select 1 from public.conversation_members cm
+      where cm.conversation_id = v_conversation_id and cm.profile_id = v_business_profile_id
+    ) or not exists(
+      select 1 from public.conversation_members cm
+      where cm.conversation_id = v_conversation_id and cm.profile_id = v_creator_profile_id
+    ) then
+      raise exception 'La conversación no coincide con los participantes de la postulación.';
+    end if;
     return v_conversation_id;
+  end if;
+
+  if v_conversation_id is not null then
+    raise exception 'Ya existe una conversación para esta campaña sin postulación aceptada correspondiente.';
   end if;
 
   select id into v_other_accepted
@@ -485,10 +647,6 @@ begin
 
   if v_other_accepted is not null then
     raise exception 'Esta campaña ya tiene un creador aceptado.';
-  end if;
-
-  if v_conversation_id is not null then
-    return v_conversation_id;
   end if;
 
   if v_campaign.status <> 'open' then
@@ -556,6 +714,19 @@ create policy "business creates campaigns"
     public.is_admin()
     or (
       public.is_active_account()
+      and status = 'draft'
+      and exists(select 1 from public.business_profiles b where b.id = business_id and b.profile_id = public.current_profile_id())
+    )
+  );
+
+drop policy if exists "business deletes campaigns" on public.campaigns;
+create policy "business deletes draft campaigns"
+  on public.campaigns for delete
+  using (
+    public.is_admin()
+    or (
+      public.is_active_account()
+      and status = 'draft'
       and exists(select 1 from public.business_profiles b where b.id = business_id and b.profile_id = public.current_profile_id())
     )
   );
@@ -640,7 +811,8 @@ create policy "own notifications"
 drop policy if exists "own notifications update" on public.notifications;
 create policy "own notifications update"
   on public.notifications for update
-  using ((account_id = auth.uid() and public.is_active_account()) or public.is_admin());
+  using ((account_id = auth.uid() and public.is_active_account()) or public.is_admin())
+  with check ((account_id = auth.uid() and public.is_active_account()) or public.is_admin());
 
 -- Políticas de escritura (resto de 004, reforzadas)
 drop policy if exists "owners update profile" on public.profiles;
@@ -649,11 +821,24 @@ create policy "owners update profile"
   using ((account_id = auth.uid() and public.is_active_account()) or public.is_admin())
   with check ((account_id = auth.uid() and public.is_active_account()) or public.is_admin());
 
+drop policy if exists "owners update creator profile" on public.creator_profiles;
+create policy "owners update creator profile"
+  on public.creator_profiles for update
+  using ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin())
+  with check ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin());
+
+drop policy if exists "owners update business profile" on public.business_profiles;
+create policy "owners update business profile"
+  on public.business_profiles for update
+  using ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin())
+  with check ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin());
+
 drop policy if exists "creator applies" on public.applications;
 create policy "creator applies"
   on public.applications for insert
   with check (
     public.is_active_account()
+    and status = 'pending'
     and exists(select 1 from public.creator_profiles c where c.id = creator_id and c.profile_id = public.current_profile_id())
     and exists(select 1 from public.campaigns ca where ca.id = campaign_id and ca.status = 'open')
   );
@@ -680,7 +865,20 @@ create policy "members send messages"
 drop policy if exists "members update own read state" on public.conversation_members;
 create policy "members update own read state"
   on public.conversation_members for update
-  using ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin());
+  using ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin())
+  with check ((profile_id = public.current_profile_id() and public.is_active_account()) or public.is_admin());
+
+drop policy if exists "reviewer updates review" on public.reviews;
+create policy "reviewer updates review"
+  on public.reviews for update
+  using (
+    (public.is_active_account() and reviewer_profile_id = public.current_profile_id())
+    or public.is_admin()
+  )
+  with check (
+    (public.is_active_account() and reviewer_profile_id = public.current_profile_id())
+    or public.is_admin()
+  );
 
 drop policy if exists "campaign parties review" on public.reviews;
 create policy "campaign parties review"
