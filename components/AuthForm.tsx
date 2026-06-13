@@ -2,13 +2,16 @@
 
 import { FormEvent, useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowRight, Building2, Eye, EyeOff, Loader2, Sparkles, UserRound } from 'lucide-react';
 import { createClient, isDemoMode, isSupabaseConfigured } from '@/lib/supabase/client';
+import { loginQueryMessage, translateAuthError } from '@/lib/auth/errors';
 import type { Role } from '@/lib/types';
 
 export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const queryNotice = loginQueryMessage(searchParams);
   const [role, setRole] = useState<Role>('business');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -41,7 +44,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
     if (mode === 'login') {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) {
-        setMessage(error.message);
+        setMessage(translateAuthError(error.message));
         setLoading(false);
         return;
       }
@@ -57,11 +60,11 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
       options: { emailRedirectTo: redirectTo, data: { full_name: name, role } },
     });
     if (error) {
-      setMessage(error.message);
+      setMessage(translateAuthError(error.message));
       setLoading(false);
       return;
     }
-    setMessage('Cuenta creada. Revisá tu correo para confirmar el registro.');
+    setMessage('Cuenta creada. Revisá tu correo para confirmar el registro antes de ingresar.');
     setLoading(false);
   }
 
@@ -86,7 +89,8 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
         {mode === 'register' && <label>Nombre completo<input name="name" required minLength={2} placeholder="Tu nombre" /></label>}
         <label>Correo electrónico<input type="email" name="email" required placeholder="tu@email.com" autoComplete="email" /></label>
         <label>Contraseña<div className="passwordField"><input type={showPassword ? 'text' : 'password'} name="password" required minLength={8} placeholder="Mínimo 8 caracteres" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} /><button type="button" onClick={() => setShowPassword(v => !v)} aria-label="Mostrar contraseña">{showPassword ? <EyeOff size={18}/> : <Eye size={18}/>}</button></div></label>
-        {message && <div className="formMessage">{message}</div>}
+        {mode === 'login' && <p className="authHelper"><Link href="/recuperar-contrasena">¿Olvidaste tu contraseña?</Link></p>}
+        {(message || queryNotice) && <div className={`formMessage${queryNotice && !message ? ' success' : ''}`}>{message || queryNotice}</div>}
         <button className="primaryBtn full" disabled={loading}>{loading ? <Loader2 className="spin" size={18}/> : <><span>{mode === 'login' ? 'Ingresar' : 'Crear cuenta'}</span><ArrowRight size={18}/></>}</button>
       </form>
 

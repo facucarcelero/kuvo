@@ -68,7 +68,7 @@ export async function middleware(request: NextRequest) {
     if (profile?.active === false) {
       const blocked = request.nextUrl.clone();
       blocked.pathname = '/login';
-      blocked.searchParams.set('blocked', '1');
+      blocked.searchParams.set('error', 'blocked');
       return NextResponse.redirect(blocked);
     }
   }
