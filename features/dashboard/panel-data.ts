@@ -1,6 +1,12 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { listFavorites } from '@/features/favorites/api';
-import { listMessages, listMyConversations, markConversationRead, sendMessage } from '@/features/messages/api';
+import {
+  listMessages,
+  listMyConversations,
+  mapMessageRow,
+  markConversationRead,
+  sendMessage,
+} from '@/features/messages/api';
 import { countUnreadNotifications, listNotifications } from '@/features/notifications/api';
 import type { Creator } from '@/lib/types';
 import { formatScoreDisplay } from '@/lib/score/kuvo-score';
@@ -49,6 +55,8 @@ function formatTime(iso: string) {
     return '';
   }
 }
+
+export { formatTime as formatMessageListTime };
 
 function formatListTime(iso: string | null) {
   if (!iso) return '';
@@ -133,12 +141,7 @@ export async function loadChatMessages(
 ) {
   const { data, error } = await listMessages(supabase, conversationId);
   if (error || !data) return { lines: [] as ChatLine[], error: error?.message };
-  const lines = [...data].reverse().map((m: any) => ({
-    id: m.id,
-    mine: m.sender_profile_id === profileId,
-    text: m.body,
-    time: formatTime(m.created_at),
-  }));
+  const lines = [...data].reverse().map((m: any) => mapMessageRow(m, profileId));
   await markConversationRead(supabase, conversationId, profileId);
   return { lines, error: undefined };
 }
@@ -154,7 +157,9 @@ export async function postChatMessage(
 
 export async function loadFavoriteCreators(supabase: SupabaseClient, accountId: string) {
   const { data, error } = await listFavorites(supabase, accountId);
-  if (error || !data?.length) return { creators: [] as Creator[], error: error?.message };
+  if (error || !data?.length) {
+    return { creators: [] as Creator[], favoriteByCreatorId: {} as Record<string, string>, error: error?.message };
+  }
 
   const ids = data.map(f => f.creator_id);
   const { data: rows, error: rowErr } = await supabase
@@ -162,7 +167,9 @@ export async function loadFavoriteCreators(supabase: SupabaseClient, accountId: 
     .select('id,profile_id,categories,followers_declared,engagement_declared,starting_price,score,profiles!inner(full_name,username,city,verified,bio)')
     .in('id', ids);
 
-  if (rowErr || !rows) return { creators: [] as Creator[], error: rowErr?.message };
+  if (rowErr || !rows) {
+    return { creators: [] as Creator[], favoriteByCreatorId: {} as Record<string, string>, error: rowErr?.message };
+  }
 
   const creators: Creator[] = rows.map((row: any, i: number) => {
     const p = row.profiles;
@@ -188,7 +195,8 @@ export async function loadFavoriteCreators(supabase: SupabaseClient, accountId: 
       portfolio: [],
     };
   });
-  return { creators, error: undefined };
+  const favoriteByCreatorId = Object.fromEntries(data.map(f => [f.creator_id, f.id]));
+  return { creators, favoriteByCreatorId, error: undefined };
 }
 
 export async function loadUnreadNotificationCount(supabase: SupabaseClient, accountId: string) {

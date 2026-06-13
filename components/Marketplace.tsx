@@ -10,6 +10,7 @@ import {
 import { Logo } from './Logo';
 import { createClient, isDemoMode, isSupabaseConfigured } from '@/lib/supabase/client';
 import { demoCampaigns, demoCreators } from '@/lib/demo';
+import { listFavorites, addFavorite, removeFavorite } from '@/features/favorites/api';
 import { formatScoreDisplay } from '@/lib/score/kuvo-score';
 import type { Campaign, Creator } from '@/lib/types';
 
@@ -82,12 +83,12 @@ export function Marketplace() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    try { setFavorites(new Set(JSON.parse(localStorage.getItem('kuvo_favorites') || '[]'))); } catch {}
     const savedTheme = localStorage.getItem('kuvo_theme');
     if (savedTheme === 'light') { setDark(false); document.documentElement.dataset.theme = 'light'; }
     if (isDemoMode()) {
       setCreators(demoCreators);
       setCampaigns(demoCampaigns);
+      try { setFavorites(new Set(JSON.parse(localStorage.getItem('kuvo_favorites') || '[]'))); } catch {}
     }
   }, []);
 
@@ -110,6 +111,11 @@ export function Marketplace() {
       }
       if (creatorResult.data?.length) setCreators(creatorResult.data.map(normalizeCreator));
       if (campaignResult.data?.length) setCampaigns(campaignResult.data.map(normalizeCampaign));
+      supabase.auth.getUser().then(async ({ data: { user } }) => {
+        if (!user) return;
+        const { data: favRows } = await listFavorites(supabase, user.id);
+        if (favRows?.length) setFavorites(new Set(favRows.map(row => row.creator_id)));
+      });
     }).finally(() => setLoading(false));
   }, []);
 
@@ -130,17 +136,33 @@ export function Marketplace() {
   }
 
   async function toggleFavorite(id: string) {
-    const next = new Set(favorites);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    setFavorites(next);
-    localStorage.setItem('kuvo_favorites', JSON.stringify([...next]));
-    notify(next.has(id) ? 'Creador guardado en favoritos' : 'Creador quitado de favoritos');
-    if (!isSupabaseConfigured()) return;
+    if (isDemoMode()) {
+      const next = new Set(favorites);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      setFavorites(next);
+      localStorage.setItem('kuvo_favorites', JSON.stringify([...next]));
+      notify(next.has(id) ? 'Creador guardado en favoritos' : 'Creador quitado de favoritos');
+      return;
+    }
+    if (!isSupabaseConfigured()) { notify('No pudimos conectar con la base de datos.'); return; }
     const supabase = createClient();
-    const { data: { user } } = await supabase!.auth.getUser();
-    if (!user) return;
-    if (next.has(id)) await supabase!.from('favorites').upsert({ account_id: user.id, creator_id: id }, { onConflict: 'account_id,creator_id' });
-    else await supabase!.from('favorites').delete().eq('account_id', user.id).eq('creator_id', id);
+    if (!supabase) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { notify('Ingresá para guardar favoritos en tu cuenta.'); return; }
+    const next = new Set(favorites);
+    if (next.has(id)) {
+      next.delete(id);
+      setFavorites(next);
+      const { data: rows } = await listFavorites(supabase, user.id);
+      const fav = rows?.find(row => row.creator_id === id);
+      if (fav) await removeFavorite(supabase, fav.id);
+      notify('Creador quitado de favoritos');
+    } else {
+      next.add(id);
+      setFavorites(next);
+      await addFavorite(supabase, user.id, id);
+      notify('Creador guardado en favoritos');
+    }
   }
 
   function switchView(next: 'creators'|'campaigns') {
@@ -285,7 +307,7 @@ export function Marketplace() {
         <div className="profileBody"><div className="creatorName"><h2>{selectedCreator.name}</h2>{selectedCreator.verified&&<BadgeCheck/>}</div><p className="creatorHandle">{selectedCreator.username} · {selectedCreator.city}</p><p>{selectedCreator.bio}</p>
         <div className="profileStats"><div><strong>{compact.format(selectedCreator.followers)}</strong><span>Seguidores declarados</span></div><div><strong>{selectedCreator.engagement}%</strong><span>Interacción declarada</span></div><div><strong>{selectedCreator.scoreLabel ?? formatScoreDisplay(selectedCreator.score)}</strong><span>KUVO Score</span></div></div>
         <h3>Servicios y portfolio</h3><div className="portfolioGrid">{selectedCreator.portfolio.map((x,i)=><div key={x} style={{background:`linear-gradient(135deg,${i%2?selectedCreator.gradient[1]:selectedCreator.gradient[0]},${i%2?selectedCreator.gradient[0]:selectedCreator.gradient[1]})`}}>{x}</div>)}</div>
-        <div className="modalActions"><p><span>Precio desde</span><strong>{money.format(selectedCreator.startingPrice)}</strong></p><Link className="primaryBtn" href="/registro">Contactar <ArrowRight size={17}/></Link></div></div>
+        <div className="modalActions"><p><span>Precio desde</span><strong>{money.format(selectedCreator.startingPrice)}</strong></p><Link className="ghostBtn" href={`/creadores/${selectedCreator.username.replace(/^@/,'')}`}>Ver perfil público</Link><Link className="primaryBtn" href="/login?next=/panel">Contactar <ArrowRight size={17}/></Link></div></div>
       </section></div>}
 
       {selectedCampaign && <div className="modalBackdrop" onMouseDown={e=>e.target===e.currentTarget&&setSelectedCampaign(null)}><section className="campaignModal">
@@ -293,7 +315,8 @@ export function Marketplace() {
         <div className="campaignModalTop"><div className="campaignBrand large" style={{background:`linear-gradient(135deg,${selectedCampaign.gradient[0]},${selectedCampaign.gradient[1]})`}}>{selectedCampaign.businessName.slice(0,2).toUpperCase()}</div><div><span>{selectedCampaign.businessName}</span><h2>{selectedCampaign.title}</h2><p><MapPin size={15}/>{selectedCampaign.city} · {selectedCampaign.category}</p></div></div>
         <p>{selectedCampaign.description}</p><h3>Entregables</h3><ul className="deliverables">{selectedCampaign.deliverables.map(x=><li key={x}><Check/>{x}</li>)}</ul>
         <div className="campaignDetails"><div><span>Presupuesto</span><strong>{money.format(selectedCampaign.budgetMin)} – {money.format(selectedCampaign.budgetMax)}</strong></div><div><span>Fecha límite</span><strong>{selectedCampaign.deadline ? new Date(selectedCampaign.deadline+'T12:00:00').toLocaleDateString('es-AR') : 'A coordinar'}</strong></div></div>
-        <Link className="primaryBtn full" href="/registro">Postularme a esta campaña <ArrowRight size={18}/></Link>
+        <Link className="ghostBtn full" href={`/campanas/${selectedCampaign.id}`}>Ver página pública</Link>
+        <Link className="primaryBtn full" href="/login?next=/panel">Postularme desde mi panel <ArrowRight size={18}/></Link>
       </section></div>}
       {toast && <div className="toast"><Check size={17}/>{toast}</div>}
     </main>

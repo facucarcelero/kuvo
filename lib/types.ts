@@ -42,6 +42,7 @@ export type Application = {
   campaignId: string;
   campaignTitle: string;
   creatorId: string;
+  creatorProfileId?: string;
   creatorName: string;
   message: string;
   proposedPrice: number;

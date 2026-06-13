@@ -1,4 +1,39 @@
-import type { SupabaseClient } from '@supabase/supabase-js';
+import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
+import type { ChatLine } from '@/features/dashboard/panel-data';
+
+export type MessageRow = {
+  id: string;
+  conversation_id: string;
+  sender_profile_id: string;
+  body: string;
+  created_at: string;
+};
+
+export function formatMessageTime(iso: string) {
+  try {
+    return new Date(iso).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+export function mapMessageRow(row: MessageRow, profileId: string): ChatLine {
+  return {
+    id: row.id,
+    mine: row.sender_profile_id === profileId,
+    text: row.body,
+    time: formatMessageTime(row.created_at),
+  };
+}
+
+export function appendChatMessage(prev: ChatLine[], line: ChatLine): ChatLine[] {
+  if (prev.some(x => x.id === line.id)) return prev;
+  return [...prev, line];
+}
+
+function removeChannelSafe(supabase: SupabaseClient, channel: RealtimeChannel) {
+  void supabase.removeChannel(channel);
+}
 
 export async function listMyConversations(supabase: SupabaseClient, profileId: string) {
   return supabase
@@ -52,4 +87,48 @@ export async function markConversationRead(
     .update({ last_read_at: new Date().toISOString() })
     .eq('conversation_id', conversationId)
     .eq('profile_id', profileId);
+}
+
+export function subscribeToConversationMessages(
+  supabase: SupabaseClient,
+  conversationId: string,
+  profileId: string,
+  onInsert: (line: ChatLine, row: MessageRow) => void,
+): () => void {
+  const channel = supabase
+    .channel(`messages:conversation:${conversationId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `conversation_id=eq.${conversationId}`,
+      },
+      (payload) => {
+        const row = payload.new as MessageRow;
+        onInsert(mapMessageRow(row, profileId), row);
+      },
+    )
+    .subscribe();
+
+  return () => removeChannelSafe(supabase, channel);
+}
+
+/** RLS limita eventos a conversaciones donde el usuario es miembro (sidebar / unread). */
+export function subscribeToMemberMessageInserts(
+  supabase: SupabaseClient,
+  profileId: string,
+  onInsert: (row: MessageRow) => void,
+): () => void {
+  const channel = supabase
+    .channel(`messages:inbox:${profileId}`)
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'messages' },
+      (payload) => onInsert(payload.new as MessageRow),
+    )
+    .subscribe();
+
+  return () => removeChannelSafe(supabase, channel);
 }

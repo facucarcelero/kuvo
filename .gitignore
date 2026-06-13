@@ -2,10 +2,16 @@ node_modules
 .next
 .env
 .env.local
+.env.*.local
 .vercel
 .DS_Store
 npm-debug.log*
 tsconfig.tsbuildinfo
+
+# Playwright
+playwright-report/
+test-results/
+blob-report/
 
 # Archivos de distribución (ya extraídos en la raíz)
 *.zip

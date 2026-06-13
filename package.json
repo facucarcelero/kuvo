@@ -10,6 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:headed": "playwright test --headed",
     "verify:post-migration": "node scripts/verify-post-migration.mjs",
     "audit:all": "npm audit --audit-level=high",
     "postbuild": "node scripts/prepare-standalone.mjs"
@@ -29,6 +32,7 @@
     "@types/react-dom": "19.2.3",
     "eslint": "^9.35.0",
     "eslint-config-next": "16.2.9",
+    "@playwright/test": "^1.58.2",
     "typescript": "6.0.3",
     "vitest": "^4.1.8"
   },
