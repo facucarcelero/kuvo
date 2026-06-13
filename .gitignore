@@ -5,6 +5,7 @@ node_modules
 .vercel
 .DS_Store
 npm-debug.log*
+tsconfig.tsbuildinfo
 
 # Archivos de distribución (ya extraídos en la raíz)
 *.zip
